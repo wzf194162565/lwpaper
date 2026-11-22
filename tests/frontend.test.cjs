@@ -111,7 +111,7 @@ test('finance defaults to per-paper sources even when pending amounts have no ac
  assert.match(nodes.get('#results').innerHTML,/实际收付款需进入论文详情逐笔登记/);
  assert.match(nodes.get('#results').innerHTML,/data-type="balances"/);
  run("api=async(url)=>url==='/api/papers'?state.papers:state.customers");
- await run("finishSave(state.papers[0],'论文已保存')");
+ await run("finishSave(state.papers[0],'保存成功')");
  assert.equal(run('state.financeType'),'balances');
  assert.match(nodes.get('#results').innerHTML,/class="finance-balances"/);
 });
@@ -143,7 +143,7 @@ test('finance summary links clear filters and show the actual payments behind ea
  run('api=async()=>state.papers[0]');
  await clickAction(handlers,{action:'detail-finance',id:'paper-0'});
  assert.equal(run('state.drawer.tab'),'finance');
- assert.match(nodes.get('#overlay-root').innerHTML,/登记收支/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/data-action="add-transaction"[^>]*>[\s\S]*新增<\/button>/);
 });
 
 test('balance sources use contract payments, show half service and overpayments, and export current search only',async()=>{
@@ -206,6 +206,129 @@ function seedBusiness(run) {
  for(const p of state.papers)p.submissions=[{id:'submission-'+p.id,title:'投稿题目 '+p.title,journal:'投稿期刊',status:'审稿中',submittedAt:today(),endedAt:'',publishedAt:'',durationDays:45,hasPassword:true,submissionAccount:'private-account',submissionSystem:'期刊系统',boundEmail:'private@example.com',boundPhone:'13800000000',submissionUrl:'https://example.com',notes:'',version:1,createdAt:p.createdAt,updatedAt:p.updatedAt}];
  state.papers[0].submissions[0].status='已发表';state.papers[0].submissions[0].publishedAt=today();`);
 }
+
+test('overview includes a future follow-up even when no record is due or within seven days',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`const scheduled=new Date();scheduled.setDate(scheduled.getDate()+20);
+  globalThis.futureDate=scheduled.getFullYear()+'-'+String(scheduled.getMonth()+1).padStart(2,'0')+'-'+String(scheduled.getDate()).padStart(2,'0');
+  state.papers=[{...state.papers[0],title:'未来跟进记录',followUpAt:futureDate,status:'待投稿'}];state.view='records';renderShell();`);
+ const overview=nodes.get('#content').innerHTML;
+ assert.match(overview,/近期需关注 <small>1 项/);assert.match(overview,/reminder-title[^>]*>未来跟进记录/);
+ assert.ok(overview.includes(run("dateLabel(futureDate)+' 跟进'")));assert.ok(!overview.includes('暂无跟进计划'));
+ assert.match(nodes.get('#root').innerHTML,/data-view="followups"[\s\S]*?class="nav-count">1<\/span>/);
+ assert.equal(run('state.papers.filter(due).length'),0);assert.equal(run('upcoming().length'),0);
+ await clickAction(handlers,{action:'navigate',view:'followups'});
+ assert.equal(run('filteredPapers().length'),1);assert.match(nodes.get('#results').innerHTML,/未来跟进记录/);
+ assert.match(nodes.get('#content').innerHTML,/全部计划<span class="count">1/);
+ await clickAction(handlers,{action:'tab',tab:'due'});
+ assert.equal(run('filteredPapers().length'),0);
+});
+
+test('overview and follow-up tabs share dates, exclusions and nearest-plan ordering',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`globalThis.offsetDate=days=>{const date=new Date();date.setDate(date.getDate()+days);return date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');};
+  state.papers=state.papers.slice(0,8).map((p,i)=>({...p,title:'跟进记录-'+i,status:'待投稿',followUpAt:[offsetDate(8),offsetDate(-2),today(),offsetDate(1),offsetDate(7),today(),today(),''][i]}));
+  state.papers[5].status='已发表';state.papers[6].status='已撤稿';state.view='records';renderShell();`);
+ const overview=run('overviewPanels()');
+ assert.match(overview,/近期需关注 <small>5 项/);assert.equal((overview.match(/class="reminder-title|paper-title reminder-title/g)||[]).length,3);
+ const ids=[...overview.matchAll(/class="paper-title reminder-title" data-action="detail" data-id="([^"]+)"/g)].map(match=>match[1]);
+ assert.deepEqual(ids,['paper-1','paper-2','paper-3']);assert.match(overview,/已逾期/);assert.match(overview,/今天跟进/);
+ for(const title of ['跟进记录-5','跟进记录-6','跟进记录-7'])assert.ok(!overview.includes(title));
+ run("state.search='干扰筛选';state.status='已发表';state.from='2999-01-01';state.page=3;");
+ await clickAction(handlers,{action:'navigate',view:'followups'});
+ assert.equal(run('filteredPapers().length'),5);assert.equal(run('state.tab'),'all');assert.equal(run('state.search'),'');
+ assert.equal(run("filteredPapers().map(p=>p.id).join(',')"),'paper-1,paper-2,paper-3,paper-4,paper-0');
+ await clickAction(handlers,{action:'tab',tab:'due'});assert.equal(run('filteredPapers().length'),2);
+ await clickAction(handlers,{action:'tab',tab:'upcoming'});assert.equal(run('filteredPapers().length'),2);
+ assert.ok(!nodes.get('#results').innerHTML.includes('data-id="paper-0"'));
+ run("api=async()=>state.papers[3]");await clickAction(handlers,{action:'detail',id:'paper-3'});
+ assert.equal(run('state.drawer.paper.id'),'paper-3');
+});
+
+test('refreshing changed follow-up dates keeps the overview count and list synchronized',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.papers=[{...state.papers[0],followUpAt:'',status:'待投稿'}];state.view='records';renderShell();globalThis.serverPapers=state.papers;api=async(url)=>url==='/api/papers'?serverPapers:state.customers;");
+ assert.match(run('overviewPanels()'),/暂无跟进计划/);
+ run("serverPapers=[{...serverPapers[0],followUpAt:today()}]");await run('loadPapers()');
+ assert.match(run('overviewPanels()'),/近期需关注 <small>1 项/);assert.match(run('overviewPanels()'),/今天跟进/);
+ await clickAction(handlers,{action:'navigate',view:'followups'});assert.equal(run('filteredPapers().length'),1);
+ run("serverPapers=[{...serverPapers[0],followUpAt:''}]");await run('loadPapers()');
+ assert.equal(run('filteredPapers().length'),0);assert.match(nodes.get('#results').innerHTML,/暂无跟进计划/);
+ await clickAction(handlers,{action:'navigate',view:'records'});assert.match(run('overviewPanels()'),/近期需关注 <small>0 项/);
+});
+
+test('all query tables number the filtered result continuously across pages',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.customers=Array.from({length:10},(_,i)=>({...state.customers[0],id:'customer-'+i,name:'客户 '+i}));`);
+ const numbers=()=>[...nodes.get('#results').innerHTML.matchAll(/<td class="sequence-cell">(\d+)<\/td>/g)].map(match=>Number(match[1]));
+ for(const [view,financeType] of [['records','balances'],['papers','balances'],['customers','balances'],['submissions','balances'],['followups','balances'],['finance','balances'],['finance','all'],['finance','incoming']]){
+  run(`state.view='${view}';state.financeType='${financeType}';state.tab='all';resetFilters();renderShell()`);
+  const count=run(view==='followups'?'filteredPapers().length':'10');
+  assert.match(nodes.get('#results').innerHTML,/<th class="sequence-cell" scope="col">序号<\/th>/);
+  assert.deepEqual(numbers(),[1,2,3,4,5,6,7,8],view+' '+financeType);
+  await clickAction(handlers,{action:'page',page:'2'});
+  assert.deepEqual(numbers(),Array.from({length:count-8},(_,i)=>9+i),view+' second page');
+  await Promise.all(handlers.get('input').map(fn=>fn({target:{id:'search',value:view==='customers'?'客户 0':'LW-2026-0'}})));
+  assert.equal(run('state.page'),1);assert.deepEqual(numbers(),[1],view+' filtered result');
+  await Promise.all(handlers.get('input').map(fn=>fn({target:{id:'search',value:'不存在的结果'}})));
+  assert.deepEqual(numbers(),[],view+' empty result');
+ }
+ run("state.papers[0].transactions[0].type='outgoing_other';state.view='finance';state.financeType='outgoing';resetFilters();renderShell()");
+ assert.deepEqual(numbers(),[1]);
+});
+
+test('all CSV exports include filtered row numbers without replacing existing identifiers',async()=>{
+ const {run}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("download=(name,blob)=>{globalThis.exported={name,blob};};state.page=2;");
+ for(const [setup,exporter,id] of [
+  ["state.view='records'",'exportPapers','LW-2026-0'],
+  ["state.view='papers'",'exportManagedPapers','LW-2026-0'],
+  ["state.view='submissions'",'exportSubmissions','LW-2026-0'],
+  ["state.view='customers'",'exportCustomers','客户乙'],
+  ["state.view='finance';state.financeType='balances'",'exportFinance','LW-2026-0'],
+  ["state.view='finance';state.financeType='all'",'exportFinance','LW-2026-0'],
+ ]){
+  run(`state.search='';${setup};${exporter}()`);
+  let csv=await run('exported.blob').text();
+  let rows=csv.trim().replace(/^\uFEFF/,'').split('\r\n');
+  assert.match(rows[0],/^"序号",/);
+  assert.ok(csv.includes(id),exporter+' retains identifying columns');
+  rows.slice(1).forEach((row,index)=>assert.ok(row.startsWith('"'+(index+1)+'",'),exporter+' sequence'));
+  run(`state.search='${id}';${exporter}()`);
+  csv=await run('exported.blob').text();rows=csv.trim().replace(/^\uFEFF/,'').split('\r\n');
+  assert.equal(rows.length,2,exporter+' filtered export');assert.match(rows[1],/^"1",/);
+ }
+});
+
+test('action labels stay concise while full, half and related record actions remain available',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ const labels=html=>[...html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].map(match=>({
+  action:match[1].match(/data-action="([^"]+)"/)?.[1],text:match[2].replace(/<[^>]*>/g,'').trim()
+ }));
+ const label=(html,action)=>labels(html).filter(button=>button.action===action).map(button=>button.text);
+ run("state.view='papers';renderShell()");
+ assert.deepEqual(label(nodes.get('#content').innerHTML,'new-paper'),['新增（半包）']);
+ assert.deepEqual(label(nodes.get('#content').innerHTML,'new-writing'),['新增（全包）']);
+ for(const [action,text] of [['edit-paper','编辑'],['delete-paper','删除'],['detail-finance','收支'],['resubmit-paper','改投']]){
+  const values=label(nodes.get('#results').innerHTML,action);assert.equal(values.length,8);assert.ok(values.every(value=>value===text));
+ }
+ run("state.papers[0].submissions=[];renderManagedPaperResults()");
+ assert.ok(label(nodes.get('#results').innerHTML,'new-submission').includes('关联期刊'));
+ run("state.view='customers';renderShell()");
+ assert.deepEqual(label(nodes.get('#content').innerHTML,'new-customer'),['新增']);
+ assert.deepEqual(label(nodes.get('#results').innerHTML,'customer-detail'),['客户乙','详情']);
+ run("state.drawer={kind:'customer-detail',customer:{...state.customers[0],paperCount:0,papers:[]}};renderCustomerDetail()");
+ assert.deepEqual(label(nodes.get('#overlay-root').innerHTML,'edit-customer'),['编辑']);
+ assert.deepEqual(label(nodes.get('#overlay-root').innerHTML,'delete-customer'),['删除']);
+ run("state.view='submissions';resetFilters();renderShell()");
+ assert.deepEqual(label(nodes.get('#content').innerHTML,'new-submission'),['新增']);
+ for(const [action,text] of [['edit-submission','编辑'],['delete-submission','删除'],['resubmit-paper','改投'],['submission-detail','详情']]){
+  assert.ok(label(nodes.get('#results').innerHTML,action).includes(text));
+ }
+ for(const command of ['openEditor()','openWritingEditor()','openCustomerEditor()','openSubmissionEditor()']){
+  run(command);assert.match(nodes.get('#overlay-root').innerHTML,/type="submit">[\s\S]*保存<\/button>/);
+ }
+});
 
 test('business filters keep writing tasks and multiple submissions linked by identity',()=>{
  const {run,nodes}=app();seedBusiness(run);
@@ -297,7 +420,7 @@ test('resubmission from details selects the current record and cancelling leaves
   if(inDetail)run("state.drawer={kind:'detail',paper:state.papers[0],tab:'submissions'};renderDetail()");
   await clickAction(handlers,{action:'resubmit-paper',paperId:'paper-0'});
   assert.equal(run('state.drawer.sourceSubmission.id'),'submission-paper-0');
-  assert.match(nodes.get('#overlay-root').innerHTML,/保存改投/);
+  assert.match(nodes.get('#overlay-root').innerHTML,/type="submit">[\s\S]*保存<\/button>/);
   await clickAction(handlers,{action:'cancel-submission'});
   assert.equal(run('JSON.stringify(state.papers[0].submissions)'),run('originalSubmissions'));
   assert.equal(run('calls.filter(call=>call.method).length'),0);
@@ -395,7 +518,7 @@ test('full and half paper rows delete only the confirmed paper using its latest 
   const confirmation=nodes.get('#overlay-root').innerHTML;
   assert.match(confirmation,/待删除论文 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(confirmation,/LW-2026-0/);assert.match(confirmation,/1 次投稿/);assert.match(confirmation,/1 笔收支/);
-  assert.match(confirmation,/客户档案和其他论文保留/);assert.match(confirmation,/此操作无法撤销/);
+  assert.match(confirmation,/客户和其他记录保留/);assert.match(confirmation,/此操作无法撤销/);
   assert.equal(confirmation.includes('写作安排'),serviceType==='full');
   await clickAction(handlers,{action:'cancel-modal'});
   assert.equal(run('deletions.length'),0);assert.equal(run('state.papers.length'),2);
@@ -437,7 +560,7 @@ test('paper deletion retains records on failure and updates summaries before a f
   assert.equal(run("state.customers.find(c=>c.id==='customer-1').paperCount"),1);
   assert.equal(run("state.customers.find(c=>c.id==='customer-1').receivedCents"),run('state.papers[0].contractReceivedCents'));
   assert.equal(run('allTransactions().length'),1);
-  assert.match(run('messages.at(-1)'),/论文已删除，列表同步暂时失败/);
+  assert.match(run('messages.at(-1)'),/删除成功，列表刷新失败/);
  }
 });
 
@@ -480,7 +603,7 @@ test('submission deletion retains the confirmation on failure and commits before
  assert.equal(run('state.modal'),null);assert.equal(run('state.papers[0].submissions.length'),0);
  if(inDetail){assert.equal(run('state.drawer.kind'),'detail');assert.equal(run('state.drawer.paper.submissions.length'),0);}
  else assert.equal(nodes.get('#overlay-root').innerHTML,'');
- assert.match(run('messages.at(-1)'),/投稿已删除，列表同步暂时失败/);
+ assert.match(run('messages.at(-1)'),/删除成功，列表刷新失败/);
  }
 });
 
@@ -527,10 +650,148 @@ function formValues(run,values) {
  run(`globalThis.formValues=${JSON.stringify(values)};globalThis.FormData=class { *[Symbol.iterator](){yield* Object.entries(globalThis.formValues);} };`);
 }
 
+function validationForm(run,id,definitions,mode='') {
+ return run(`(()=>{
+  const summary={textContent:'',isConnected:true,dataset:{},focusCount:0,scrollCount:0,focus(){this.focusCount++;},scrollIntoView(){this.scrollCount++;}};
+  const submit={disabled:false,isConnected:true,innerHTML:'保存'};
+  const errors={};
+  const form={id:${JSON.stringify(id)},dataset:{mode:${JSON.stringify(mode)}},elements:[],querySelector(selector){
+   if(selector==='[type=submit]')return submit;if(selector==='.error-message')return summary;return errors[selector]||null;
+  }};
+  for(const definition of ${JSON.stringify(definitions)}){
+   const label={textContent:definition.label,mark:null,querySelector(selector){return selector==='.required-mark'?this.mark:null;},append(mark){this.mark=mark;}};
+   const control={tagName:'INPUT',type:'text',required:false,disabled:false,checked:false,value:'',...definition,
+    id:'test-'+definition.name,dataset:{label:definition.label},form,labels:[label],attributes:{},focusCount:0,scrollCount:0,
+    setAttribute(key,value){this.attributes[key]=value;},getAttribute(key){return this.attributes[key]||null;},
+    focus(){this.focusCount++;},scrollIntoView(){this.scrollCount++;},
+   };
+   Object.defineProperty(control,'validity',{get(){const state={...control.flags};
+    if(control.type==='number'&&control.value!==''){if(control.min!==undefined&&Number(control.value)<Number(control.min))state.rangeUnderflow=true;
+     if(control.max!==undefined&&Number(control.value)>Number(control.max))state.rangeOverflow=true;}
+    state.valid=!Object.values(state).some(Boolean);return state;
+   }});
+   const error={id:control.id+'-error',textContent:'',hidden:true};errors['#'+control.id+'-error']=error;
+   control.inlineError=error;form.elements.push(control);form.elements[control.name]=control;
+  }
+  globalThis.FormData=class { constructor(form){this.form=form;} *[Symbol.iterator](){for(const control of this.form.elements)if(!control.disabled&&(control.type!=='checkbox'||control.checked))yield [control.name,control.value];} };
+  return {form,summary,submit,event:{target:form,preventDefault(){}},controls:form.elements};
+ })()`);
+}
+
+test('missing required values block all form submissions and focus the first invalid field',async()=>{
+ for(const [id,name,label] of [['paper-form','title','论文题目'],['customer-form','name','客户姓名'],['submission-form','journal','投稿期刊名称'],['transaction-form','amount','金额（元）'],['auth-form','username','登录账号'],['password-form','currentPassword','当前密码'],['restore-form','password','备份密码']]){
+  const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+  run('globalThis.calls=[];api=async(...args)=>{calls.push(args);return {};};');
+  const fixture=validationForm(run,id,[{name,label,required:true,value:'   '}],'login');
+  await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+  assert.equal(run('calls.length'),0,id);assert.match(fixture.summary.textContent,/未提交/);assert.ok(fixture.summary.textContent.includes(label));
+  assert.equal(fixture.controls[0].attributes['aria-invalid'],'true');assert.equal(fixture.controls[0].inlineError.hidden,false);
+  assert.equal(fixture.controls[0].focusCount,1);assert.equal(fixture.controls[0].scrollCount,1);
+  assert.equal(fixture.submit.disabled,false);assert.equal(fixture.submit.innerHTML,'保存');assert.equal(fixture.controls[0].value,'   ');
+ }
+});
+
+test('submission date becomes visibly required with the selected status and can be corrected without reopening',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.drawer={kind:'submission-edit',paper:state.papers[0],submission:null};globalThis.calls=[];api=async(url,options)=>{calls.push({url,options});return state.papers[0];};finishSave=async()=>{};");
+ const fixture=validationForm(run,'submission-form',[
+  {name:'journal',label:'投稿期刊名称',required:true,value:'期刊甲'},
+  {name:'status',label:'投稿状态',tagName:'SELECT',value:'审稿中'},
+  {name:'submittedAt',label:'实际投稿日期',type:'date',value:''},
+ ]);
+ await Promise.all(handlers.get('change').map(handler=>handler({target:fixture.controls.status})));
+ assert.equal(fixture.controls.submittedAt.required,true);assert.equal(fixture.controls.submittedAt.labels[0].mark.textContent,'必填');
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),0);assert.match(fixture.summary.textContent,/实际投稿日期/);
+ fixture.controls.submittedAt.value='2026-01-01';
+ await Promise.all(handlers.get('input').map(handler=>handler({target:fixture.controls.submittedAt})));
+ assert.equal(fixture.summary.textContent,'');assert.equal(fixture.controls.submittedAt.inlineError.hidden,true);
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.equal(fixture.submit.disabled,false);
+ const sent=JSON.parse(run('calls[0].options.body'));assert.equal(sent.submittedAt,'2026-01-01');assert.equal(sent.status,'审稿中');
+ fixture.controls.status.value='待投稿';fixture.controls.submittedAt.value='';
+ await Promise.all(handlers.get('change').map(handler=>handler({target:fixture.controls.status})));
+ assert.equal(fixture.controls.submittedAt.required,false);assert.equal(fixture.controls.submittedAt.labels[0].mark.hidden,true);
+});
+
+test('cross-field mistakes highlight dates and deposits while a rejected save keeps entered content',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.drawer={kind:'edit',paper:null};globalThis.calls=[];api=async(...args)=>{calls.push(args);throw new Error('数据库暂时不可用，请稍后重试');};");
+ const fixture=validationForm(run,'paper-form',[
+  {name:'title',label:'论文题目',required:true,value:'需要保留的题目'},
+  {name:'writingStartAt',label:'写作开始日期',type:'date',value:'2026-02-01'},
+  {name:'writingDueAt',label:'预计交稿日期',type:'date',value:'2026-01-01'},
+  {name:'writerFee',label:'稿酬总额',type:'number',value:'100'},
+  {name:'writerDepositAmount',label:'约定定金',type:'number',value:'200'},
+ ]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),0);assert.match(fixture.summary.textContent,/共 2 项待修改/);
+ assert.match(fixture.controls.writingDueAt.inlineError.textContent,/不能早于/);assert.match(fixture.controls.writerDepositAmount.inlineError.textContent,/不能超过/);
+ fixture.controls.writingDueAt.value='2026-02-02';fixture.controls.writerDepositAmount.value='50';
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.match(fixture.summary.textContent,/数据库暂时不可用/);
+ assert.equal(fixture.summary.focusCount,1);assert.equal(fixture.controls.title.value,'需要保留的题目');
+ assert.equal(fixture.submit.disabled,false);assert.equal(fixture.submit.innerHTML,'保存');
+});
+
+test('zero payments and invalid email formats receive specific inline errors',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run('globalThis.calls=[];api=async(...args)=>calls.push(args);');
+ const payment=validationForm(run,'transaction-form',[{name:'amount',label:'金额（元）',type:'number',required:true,value:'0',min:'0.01'}]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(payment.event)));
+ assert.match(payment.summary.textContent,/不能小于 0.01/);assert.equal(run('calls.length'),0);
+ const customer=validationForm(run,'customer-form',[{name:'email',label:'邮箱',type:'email',value:'wrong-email',flags:{typeMismatch:true}}]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(customer.event)));
+ assert.match(customer.summary.textContent,/name@example.com/);assert.equal(run('calls.length'),0);
+});
+
+test('server validation errors identify their field and password mismatch never sends a request',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("globalThis.calls=[];api=async(...args)=>{calls.push(args);throw new Error('客户邮箱格式不正确');};state.drawer={kind:'customer-edit',customer:null};");
+ const customer=validationForm(run,'customer-form',[{name:'email',label:'客户邮箱',type:'email',value:'customer@example.com'}]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(customer.event)));
+ assert.equal(run('calls.length'),1);assert.equal(customer.controls.email.focusCount,1);
+ assert.match(customer.controls.email.inlineError.textContent,/邮箱格式不正确/);
+ const password=validationForm(run,'password-form',[
+  {name:'newPassword',label:'新密码',required:true,value:'Example-password-123'},
+  {name:'confirm',label:'确认新密码',required:true,value:'Different-password-123'},
+ ]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(password.event)));
+ assert.equal(run('calls.length'),1);assert.match(password.summary.textContent,/两次输入/);assert.equal(password.controls.confirm.focusCount,1);
+});
+
+test('form preparation adds accessible requirements and inline feedback to manually written fields',async()=>{
+ const {run}=app();await new Promise(resolve=>setImmediate(resolve));
+ const fixture=validationForm(run,'customer-form',[{name:'name',label:'客户姓名',required:true,value:''}]);
+ fixture.summary.classList={add(){}};
+ fixture.form.insertAdjacentHTML=function(position,html){this.guide=html;};
+ fixture.controls.name.closest=()=>({querySelector:()=>null});
+ run('globalThis.preparedRoot={querySelectorAll(){return [];}};');
+ const root=run('preparedRoot');root.querySelectorAll=()=>[fixture.form];
+ run('prepareForms(preparedRoot)');
+ assert.equal(fixture.form.noValidate,true);assert.match(fixture.form.guide,/其余可选/);
+ assert.equal(fixture.controls.name.attributes['aria-required'],'true');
+ assert.equal(fixture.controls.name.labels[0].mark.textContent,'必填');
+ assert.match(fixture.controls.name.attributes['aria-describedby'],/test-name-error/);
+ assert.equal(fixture.summary.tabIndex,-1);
+});
+
+test('long business forms show errors in their action footer and mark required fields explicitly',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ for(const command of ['openEditor()','openWritingEditor()','openCustomerEditor()','openSubmissionEditor(state.papers[0])',"state.drawer={kind:'detail',paper:state.papers[0]};transactionForm()"]){
+  run(command);const html=nodes.get('#overlay-root').innerHTML;
+  assert.match(html,/<form[^>]*novalidate/);assert.match(html,/<span class="required-mark">必填<\/span>/);
+  assert.match(html,/<footer class="drawer-foot"><div class="error-message form-feedback" role="alert" aria-live="assertive"/);
+ }
+ run("openSubmissionEditor(state.papers[0],state.papers[0].submissions[0])");
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="submittedAt"[^>]*required/);
+ run("openEditor();");assert.match(nodes.get('#overlay-root').innerHTML,/name="title"[^>]*placeholder="填写客户提供的文章题目"/);
+});
+
 test('home exposes login, registration and password change without confusing registration with login',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
  for(const label of ['登录','注册','修改密码'])assert.ok(nodes.get('#root').innerHTML.includes(`>${label}</button>`));
- assert.match(nodes.get('#root').innerHTML,/id="auth-form" data-mode="login"/);
+ assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="login"/);
  await clickAction(handlers,{action:'auth-mode',mode:'login'});
  assert.match(nodes.get('#root').innerHTML,/data-mode="login"/);
  assert.ok(!nodes.get('#root').innerHTML.includes('name="confirm"'));
@@ -539,7 +800,7 @@ test('home exposes login, registration and password change without confusing reg
  for(const name of ['username','currentPassword','newPassword','confirm'])assert.ok(nodes.get('#root').innerHTML.includes(`name="${name}"`));
  assert.match(nodes.get('#root').innerHTML,/需要原密码/);
  run("state.initialized=true;state.username='<script>';state.authMode='register';renderAuth()");
- assert.match(nodes.get('#root').innerHTML,/id="auth-form" data-mode="register"/);
+ assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="register"/);
  for(const name of ['username','password','confirm'])assert.ok(nodes.get('#root').innerHTML.includes(`name="${name}"`));
  assert.ok(!nodes.get('#root').innerHTML.includes('当前工作台已注册'));
  assert.match(nodes.get('#root').innerHTML,/独立工作台/);
@@ -570,7 +831,7 @@ test('duplicate account errors retain the registration form so a different accou
  const {event,error,submit}=formEvent('auth-form','register');
  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
  assert.match(error.textContent,/该账号已被注册/);assert.equal(submit.disabled,false);
- assert.match(nodes.get('#root').innerHTML,/id="auth-form" data-mode="register"/);
+ assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="register"/);
  assert.equal(run('state.authenticated'),false);
  run("globalThis.registered=[];api=async(url,options={})=>{if(options.method){registered.push(JSON.parse(options.body));return {csrf:'second-token',username:'new-user'};}return [];};");
  formValues(run,{username:'new-user',password:'Test-password-2026',confirm:'Test-password-2026'});
@@ -597,7 +858,7 @@ test('home password change validates confirmation, retains errors and returns to
  assert.equal(run('calls[0].data.currentPassword'),'Original-password');
  assert.equal(run('calls[0].data.newPassword'),'Changed-password');
  assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');assert.equal(run('state.authMode'),'login');
- assert.match(nodes.get('#root').innerHTML,/登录系统/);assert.match(run('messages.at(-1)'),/请使用新密码登录/);
+ assert.match(nodes.get('#root').innerHTML,/登录系统/);assert.match(run('messages.at(-1)'),/密码修改成功，请重新登录/);
  assert.ok(!nodes.get('#root').innerHTML.includes('Changed-password'));
 });
 
@@ -616,7 +877,7 @@ test('new paper and new writing actions open distinct half and full forms with t
  run("state.view='papers';renderShell()");
  assert.match(nodes.get('#content').innerHTML,/data-action="new-paper"/);
  assert.match(nodes.get('#content').innerHTML,/data-action="new-writing"/);
- for(const [action,type,title] of [['new-paper','half','新建论文（半包）'],['new-writing','full','新建论文（全包）']]){
+ for(const [action,type,title] of [['new-paper','half','新增记录（半包）'],['new-writing','full','新增记录（全包）']]){
   const button={dataset:{action,customerId:'customer-1'},isConnected:true,disabled:false};
   await Promise.all(handlers.get('click').map(fn=>fn({target:{closest:()=>button}})));
   const html=nodes.get('#overlay-root').innerHTML;
@@ -628,10 +889,10 @@ test('new paper and new writing actions open distinct half and full forms with t
   assert.equal(html.includes('name="writerFee"'),type==='full');
  }
  run("state.papers[0].serviceType='half';openEditor(state.papers[0])");
- assert.match(nodes.get('#overlay-root').innerHTML,/id="drawer-title">编辑论文（半包）<\/h2>/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/id="drawer-title">编辑记录（半包）<\/h2>/);
  assert.ok(!nodes.get('#overlay-root').innerHTML.includes('name="writerFee"'));
  run('delete state.papers[0].serviceType;openEditor(state.papers[0])');
- assert.match(nodes.get('#overlay-root').innerHTML,/id="drawer-title">编辑论文（全包）<\/h2>/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/id="drawer-title">编辑记录（全包）<\/h2>/);
  run("state.drawer={kind:'customer-detail',customer:{...state.customers[0],papers:state.papers}};renderCustomerDetail()");
  assert.match(nodes.get('#overlay-root').innerHTML,/data-action="navigate" data-view="papers" data-customer-id="customer-1"/);
  await clickAction(handlers,{action:'navigate',view:'papers',customerId:'customer-1'});
@@ -752,7 +1013,7 @@ test('a saved paper is visible and the form is closed even while list refresh is
  assert.equal(submit.disabled,true);
  assert.equal(submit.innerHTML,'保存中…');
  run("rejectRefresh(new Error('网络暂时不可用'))");await saving;
- assert.match(run('messages.at(-1).message'),/数据已保存.*列表同步暂时失败/);
+ assert.match(run('messages.at(-1).message'),/保存成功.*列表刷新失败/);
  assert.equal(run('state.papers[0].title'),'已保存的半包论文');
  assert.equal(nodes.get('#overlay-root').innerHTML,'');
 });

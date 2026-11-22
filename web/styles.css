@@ -7,6 +7,9 @@
 .submission-row-actions{display:flex;align-items:center;gap:12px;white-space:nowrap}
 .submission-row-actions .submission-delete{color:var(--red)}
 .text-btn.paper-delete{color:var(--red)}
+.sequence-cell{width:64px;min-width:64px;color:var(--muted);font-variant-numeric:tabular-nums}
+th.sequence-cell{white-space:nowrap}
+.record-sequence{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;padding:0 6px;margin-right:8px;border-radius:5px;background:var(--green-bg);color:var(--green);font-size:var(--font-size-small);font-weight:var(--font-weight-regular);font-variant-numeric:tabular-nums;flex-shrink:0;vertical-align:middle}
 .submission-history{margin-bottom:24px;border:1px solid #dfe9e2;border-radius:10px;background:#f7faf7;overflow:hidden}
 .submission-history summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:15px 16px;cursor:pointer;color:var(--green);list-style:none}
 .submission-history summary::-webkit-details-marker{display:none}
@@ -37,12 +40,12 @@
   --bg:#f5f6f8;--surface:#fff;--ink:#202c31;--muted:#879098;--line:#e9edef;--green:#28604f;--green-bg:#edf5f0;--gold:#bb873c;--red:#bd605b;--radius:12px;
   /* One font stack and text scale across navigation, content, forms and dialogs. */
   --font-ui:"Microsoft YaHei UI","Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
-  --font-size-caption:11px;
-  --font-size-small:12px;
-  --font-size-body:13px;
-  --font-size-section:14px;
-  --font-size-dialog:18px;
-  --font-size-title:26px;
+  --font-size-caption:12px;
+  --font-size-small:13px;
+  --font-size-body:14px;
+  --font-size-section:15px;
+  --font-size-dialog:20px;
+  --font-size-title:28px;
   --font-weight-regular:400;
   --font-weight-semibold:600;
   --font-weight-bold:700;
@@ -79,3 +82,25 @@
 :where(.btn:not(.danger):not(.text-btn),.nav-item,.tab,.page-btn):not(:disabled):active{background:var(--green-hover);border-color:var(--green-hover);color:#fff}
 .nav-item:is(.active,:hover,:active) .nav-count,.tab:is(.active,:hover,:active) .count{background:#ffffff26;color:#fff}
 @media(max-width:640px){.auth-nav{margin-top:15px}.topbar .topbar-right{gap:6px}.topbar .account-password{font-size:var(--font-size-small);padding:7px 9px}.topbar-right .connection,.topbar .breadcrumb>span,.topbar .breadcrumb>.icon{display:none}}
+
+/* Consistent, readable headings and validation feedback. */
+thead{background:#f1f5f5;color:#53656b;font-size:var(--font-size-small)}
+th{font-weight:var(--font-weight-semibold);line-height:1.65}
+.panel-hint,.subtitle,.cell-sub,.paper-meta{color:#75848b}
+.field label{color:#35484f;font-size:var(--font-size-body);font-weight:var(--font-weight-semibold)}
+.field small{color:#60756b;font-size:var(--font-size-small);line-height:1.7}
+.required-mark{display:inline-block;margin-left:7px;padding:1px 6px;background:#fff0ed;border-radius:4px;color:#a63529;font-size:var(--font-size-caption);font-style:normal;font-weight:var(--font-weight-semibold);vertical-align:middle;white-space:nowrap}
+.form-guide{padding:10px 12px;margin:0 0 20px;background:#f3f7f5;border-radius:7px;color:#50685d;font-size:var(--font-size-small);line-height:1.7}
+.form-guide .required-mark{margin-left:0;margin-right:4px}
+.field-error{margin:5px 0 0;color:#ab3025;font-size:var(--font-size-small);line-height:1.6}
+.field-error[hidden],.required-mark[hidden]{display:none}
+.field [aria-invalid=true]{border-color:#bd5348;background:#fffafa;box-shadow:0 0 0 2px #bd534815}
+.error-message:not(:empty){padding:11px 13px;border:1px solid #edb8b0;border-left:4px solid #b64134;border-radius:7px;background:#fff3f0;color:#992d22;font-size:var(--font-size-body);line-height:1.65;overflow-wrap:anywhere}
+.error-message:empty{display:none}
+.form-feedback{width:100%;margin:0}
+.drawer-foot{flex-wrap:wrap;row-gap:12px}
+.drawer-foot>.form-feedback{flex:0 0 100%;order:-1}
+.drawer-foot>.actions{margin-left:auto}
+.modal>p{white-space:pre-line;color:#52656c;font-size:var(--font-size-body);line-height:1.9;overflow-wrap:anywhere}
+.modal h2{font-size:var(--font-size-dialog)}
+@media(max-width:640px){.field input,.field select,.field textarea{font-size:var(--font-size-body)}.drawer-foot{padding:13px 16px}.error-message:not(:empty){padding:9px 11px}}
