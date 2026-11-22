@@ -68,6 +68,14 @@ async function api(path, options={}) {
 const request = (method, path, body={}) => api(path,{method,body:JSON.stringify(body)});
 async function loadPapers() { const [papers,customers] = await Promise.all([api('/api/papers'),api('/api/customers')]); state.papers=papers;state.customers=customers;renderShell(); }
 
+function syncCustomerSummaries() {
+ for(const c of state.customers) {
+  const papers=state.papers.filter(p=>p.customerId===c.id);
+  Object.assign(c,{paperCount:papers.length,publishedPaperCount:papers.filter(p=>p.published).length,
+   publishedJournals:[...new Set(papers.flatMap(p=>p.publishedJournals||[]))],contractCents:sum(papers,'contractCents'),
+   receivedCents:sum(papers,'contractReceivedCents'),receivableCents:sum(papers,'receivableCents'),writerFeeCents:sum(papers,'writerFeeCents')});
+ }
+}
 
 // Commit the successful response to the visible list before syncing related summaries.
 // A failed follow-up GET must never leave a saved form open for accidental resubmission.
@@ -75,12 +83,7 @@ async function finishSave(saved,message,{customer=false,view=state.view,financeT
  if(customer)state.customers=[saved,...state.customers.filter(c=>c.id!==saved.id)];
  else {
   state.papers=[saved,...state.papers.filter(p=>p.id!==saved.id)];
-  for(const c of state.customers) {
-   const papers=state.papers.filter(p=>p.customerId===c.id);
-   Object.assign(c,{paperCount:papers.length,publishedPaperCount:papers.filter(p=>p.published).length,
-    publishedJournals:[...new Set(papers.flatMap(p=>p.publishedJournals||[]))],contractCents:sum(papers,'contractCents'),
-    receivedCents:sum(papers,'contractReceivedCents'),receivableCents:sum(papers,'receivableCents'),writerFeeCents:sum(papers,'writerFeeCents')});
-  }
+  syncCustomerSummaries();
  }
  state.view=view;state.tab='all';state.financeType=financeType;resetFilters();
  closeOverlay();renderShell();toast(message);
@@ -340,8 +343,16 @@ document.addEventListener('click', async event => {
    clearTimeout(credentialTimer);credentialTimer=setTimeout(hideCredential,30000);
   }
   else if(action==='delete-paper') {
-   const p=state.drawer.paper;
-   confirmModal('删除这篇论文？',`“${p.title}”的档案、投稿历史和 ${p.transactions.length} 笔收支将一起删除。删除前建议下载加密备份。`,async()=>{await request('DELETE',`/api/papers/${p.id}`,{version:p.version});closeOverlay();await loadPapers();toast('论文已删除');},'确认删除',true);
+   button.disabled=true;
+   const id=button.dataset.id||state.drawer?.paper?.id;
+   if(!id)throw new Error('请选择要删除的论文');
+   const p=await api(`/api/papers/${encodeURIComponent(id)}`);
+   confirmModal('删除这篇论文？',`将删除“${p.title}”（${p.code}）的档案、${hasWriting(p)?'写作安排、':''}${p.submissions?.length||0} 次投稿及账号资料、投稿历史和 ${p.transactions?.length||0} 笔收支，相关统计将重新计算。客户档案和其他论文保留。此操作无法撤销，删除前建议下载加密备份。`,async()=>{
+    await request('DELETE',`/api/papers/${encodeURIComponent(p.id)}`,{version:p.version});
+    state.papers=state.papers.filter(paper=>paper.id!==p.id);syncCustomerSummaries();
+    closeOverlay();renderShell();toast('论文已删除');
+    try{await loadPapers();}catch(error){if(state.authenticated)toast(`论文已删除，列表同步暂时失败，请点击刷新。${error.message}`,true);}
+   },'确认删除',true);
   }
   else if(action==='delete-transaction') {
    const p=state.drawer.paper;const id=button.dataset.id;const tx=p.transactions.find(x=>x.id===id);

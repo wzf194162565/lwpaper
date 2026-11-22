@@ -126,6 +126,15 @@ class MysqlTest(ApiTestCase):
     test_service_type_validation = test_business.BusinessTest.test_service_type_validation_prevents_accidental_writing_data_loss
     test_schema2_backup_without_service_type = test_business.BusinessTest.test_schema2_backup_without_service_type_preserves_writing
 
+    def test_delete_paper_preserves_customer_and_other_papers_after_restart(self):
+        test_business.BusinessTest.test_delete_paper_preserves_customer_and_other_papers_after_restart(self)
+        for table in ('lw_paper', 'lw_writing_task', 'lw_submission', 'lw_financial_transaction',
+                      'lw_paper_history', 'lw_paper_current_submission'):
+            column = 'id' if table == 'lw_paper' else 'paper_id'
+            self.assertEqual('0', self.sql(f"SELECT COUNT(*) FROM {table} WHERE {column}='{self.deleted_paper_id}'"), table)
+        ids = ','.join("'" + value + "'" for value in self.deleted_submission_ids)
+        self.assertEqual('0', self.sql(f"SELECT COUNT(*) FROM lw_submission_credential WHERE submission_id IN ({ids})"))
+
     def test_half_papers_have_no_writing_task_and_schema_upgrade_preserves_old_tasks(self):
         self.setup_account()
         full = self.call('POST', '/api/papers', {'title': '已有写作论文', 'writer': '原写作人'}, expected=201)

@@ -53,7 +53,7 @@ function managedPaperRow(p) {
  <td>${full?`${dateLabel(p.writingDeliveredAt)}<div class="cell-sub">${daysLabel(p.writingDays)}</div>`:'—'}</td>
  <td class="cell-money">${yuan(p.contractCents)}<div class="cell-sub">${full?`稿酬 ${yuan(p.writerFeeCents)}`:'无需写作稿酬'}</div>${full?`<div class="cell-sub">约定定金 ${yuan(p.writerDepositCents)} / 尾款 ${yuan(p.writerBalanceCents)}</div>`:''}</td>
  <td>${full?`<div>定金 ${yuan(p.outgoing_depositCents)}</div><div class="cell-sub">尾款 ${yuan(p.outgoing_balanceCents)} · 待付 ${yuan(p.payableCents)}</div>`:'—'}</td>
- <td><button class="text-btn" data-action="edit-paper" data-id="${esc(p.id)}">${icon('edit')}编辑论文</button><div class="cell-sub"><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">登记 / 查看收支</button></div><div class="cell-sub"><button class="text-btn" data-action="${p.submissions?.length?'resubmit-paper':'new-submission'}" data-paper-id="${esc(p.id)}">${p.submissions?.length?'改投论文':'关联期刊'}${icon('chevron')}</button></div></td></tr>`;
+ <td><button class="text-btn" data-action="edit-paper" data-id="${esc(p.id)}">${icon('edit')}编辑论文</button><div class="cell-sub"><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">登记 / 查看收支</button></div><div class="cell-sub"><button class="text-btn" data-action="${p.submissions?.length?'resubmit-paper':'new-submission'}" data-paper-id="${esc(p.id)}">${p.submissions?.length?'改投论文':'关联期刊'}${icon('chevron')}</button></div><div class="cell-sub"><button class="text-btn paper-delete" data-action="delete-paper" data-id="${esc(p.id)}">${icon('trash')}删除论文</button></div></td></tr>`;
 }
 function renderManagedPaperResults() {
  if(!validDateRange()){$('#results').innerHTML='<div class="empty-state"><h3>起始日期不能晚于截止日期</h3></div>';return;}

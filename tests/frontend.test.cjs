@@ -374,6 +374,73 @@ test('paper creation is confined to paper management and unrelated empty views o
  assert.match(nodes.get('#content').innerHTML,/data-action="new-writing"/);
 });
 
+test('full and half paper rows delete only the confirmed paper using its latest version',async()=>{
+ for(const serviceType of ['full','half']){
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+  run(`state.authenticated=true;state.papers=state.papers.slice(0,2);state.papers[0].serviceType='${serviceType}';
+   state.view='papers';syncCustomerSummaries();renderShell();
+   globalThis.originalOther=JSON.stringify(state.papers[1]);globalThis.deletions=[];
+   globalThis.latestPaper={...state.papers[0],version:9,title:'待删除论文 <script>alert(1)</script>'};
+   api=async(url,options={})=>{
+    if(options.method==='DELETE'){deletions.push({url,data:JSON.parse(options.body)});return {ok:true};}
+    if(url==='/api/papers/paper-0')return latestPaper;
+    if(url==='/api/papers'){if(state.papers.some(p=>p.id==='paper-0'))throw new Error('删除成功后应先更新列表');return state.papers;}
+    if(url==='/api/customers')return state.customers;
+    throw new Error('未预期的请求：'+url);
+   };`);
+  assert.match(nodes.get('#results').innerHTML,/class="text-btn paper-delete" data-action="delete-paper" data-id="paper-0"/);
+  const selected={action:'delete-paper',id:'paper-0'};
+  await clickAction(handlers,selected);
+  assert.equal(run('state.modal.kind'),'confirm');assert.equal(run('deletions.length'),0);
+  const confirmation=nodes.get('#overlay-root').innerHTML;
+  assert.match(confirmation,/待删除论文 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(confirmation,/LW-2026-0/);assert.match(confirmation,/1 次投稿/);assert.match(confirmation,/1 笔收支/);
+  assert.match(confirmation,/客户档案和其他论文保留/);assert.match(confirmation,/此操作无法撤销/);
+  assert.equal(confirmation.includes('写作安排'),serviceType==='full');
+  await clickAction(handlers,{action:'cancel-modal'});
+  assert.equal(run('deletions.length'),0);assert.equal(run('state.papers.length'),2);
+  assert.equal(nodes.get('#overlay-root').innerHTML,'');
+  await clickAction(handlers,selected);await clickAction(handlers,{action:'confirm-modal'});
+  assert.equal(run('deletions.length'),1);assert.equal(run('deletions[0].url'),'/api/papers/paper-0');
+  assert.equal(run('deletions[0].data.version'),9);
+  assert.equal(run('state.papers.length'),1);assert.equal(run('JSON.stringify(state.papers[0])'),run('originalOther'));
+  assert.equal(run("state.customers.find(c=>c.id==='customer-1').paperCount"),1);
+  assert.equal(run("state.customers.find(c=>c.id==='customer-1').contractCents"),run('state.papers[0].contractCents'));
+  assert.equal(run('state.modal'),null);assert.equal(run('state.drawer'),null);
+  assert.ok(!nodes.get('#results').innerHTML.includes('data-action="delete-paper" data-id="paper-0"'));
+ }
+});
+
+test('paper deletion retains records on failure and updates summaries before a failed refresh',async()=>{
+ for(const inDetail of [false,true]){
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+  run(`state.authenticated=true;state.papers=state.papers.slice(0,2);state.view='papers';syncCustomerSummaries();renderShell();
+   globalThis.originalPaper=state.papers[0];globalThis.originalOther=JSON.stringify(state.papers[1]);
+   globalThis.allowDelete=false;globalThis.messages=[];toast=message=>messages.push(message);
+   api=async(url,options={})=>{
+    if(options.method==='DELETE'){if(!allowDelete)throw new Error('论文已更新，请刷新后重试');return {ok:true};}
+    if(url==='/api/papers/paper-0')return {...originalPaper,version:7};
+    throw new Error('列表暂时无法同步');
+   };`);
+  if(inDetail)run("state.drawer={kind:'detail',paper:originalPaper,tab:'basic'};renderDetail()");
+  const selected=inDetail?{action:'delete-paper'}:{action:'delete-paper',id:'paper-0'};
+  await clickAction(handlers,selected);await clickAction(handlers,{action:'cancel-modal'});
+  assert.equal(run('state.papers.length'),2);
+  if(inDetail)assert.equal(run('state.drawer.paper.id'),'paper-0');
+  await clickAction(handlers,selected);await clickAction(handlers,{action:'confirm-modal'});
+  assert.equal(run('state.modal.kind'),'confirm');assert.equal(run('state.papers.length'),2);
+  assert.equal(run("state.customers.find(c=>c.id==='customer-1').paperCount"),2);
+  run('allowDelete=true');await clickAction(handlers,{action:'confirm-modal'});
+  assert.equal(run('state.modal'),null);assert.equal(run('state.drawer'),null);
+  assert.equal(nodes.get('#overlay-root').innerHTML,'');
+  assert.equal(run('state.papers.length'),1);assert.equal(run('JSON.stringify(state.papers[0])'),run('originalOther'));
+  assert.equal(run("state.customers.find(c=>c.id==='customer-1').paperCount"),1);
+  assert.equal(run("state.customers.find(c=>c.id==='customer-1').receivedCents"),run('state.papers[0].contractReceivedCents'));
+  assert.equal(run('allTransactions().length'),1);
+  assert.match(run('messages.at(-1)'),/论文已删除，列表同步暂时失败/);
+ }
+});
+
 test('submission row deletion confirms the selected record and refreshes the list without deleting the paper',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.papers=state.papers.slice(0,1);state.view='submissions';state.search='客户乙';state.customerId='customer-1';renderShell();

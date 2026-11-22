@@ -6,6 +6,7 @@
 .account-password{white-space:nowrap}
 .submission-row-actions{display:flex;align-items:center;gap:12px;white-space:nowrap}
 .submission-row-actions .submission-delete{color:var(--red)}
+.text-btn.paper-delete{color:var(--red)}
 .submission-history{margin-bottom:24px;border:1px solid #dfe9e2;border-radius:10px;background:#f7faf7;overflow:hidden}
 .submission-history summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:15px 16px;cursor:pointer;color:var(--green);list-style:none}
 .submission-history summary::-webkit-details-marker{display:none}

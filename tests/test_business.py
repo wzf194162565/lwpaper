@@ -7,6 +7,58 @@ from test_system import ApiTestCase, ROOT
 
 
 class BusinessTest(ApiTestCase):
+    def test_delete_paper_preserves_customer_and_other_papers_after_restart(self):
+        self.setup_account()
+        customer = self.call('POST', '/api/customers', {'name': '保留的客户'}, expected=201)
+        paper = self.call('POST', '/api/papers', {'title': '要删除的全包论文', 'serviceType': 'full',
+                          'customerId': customer['id'], 'writer': '写作人', 'writingStatus': '写作中',
+                          'contractAmount': '1000', 'writerFee': '300'}, expected=201)
+        path = f"/api/papers/{paper['id']}"
+        for journal in ('原投期刊', '改投期刊'):
+            paper = self.call('POST', path + '/submissions', {'version': paper['version'],
+                              'journal': journal, 'submissionAccount': 'test-account',
+                              'submissionPassword': 'disposable-test-secret'}, expected=201)
+        paper = self.call('POST', path + '/transactions', {'version': paper['version'],
+                          'type': 'incoming_deposit', 'amount': '100', 'date': '2026-01-01'}, expected=201)
+        paper = self.call('POST', path + '/transactions', {'version': paper['version'],
+                          'type': 'outgoing_deposit', 'amount': '50', 'date': '2026-01-02'}, expected=201)
+        other = self.call('POST', '/api/papers', {'title': '保留的半包论文', 'serviceType': 'half',
+                          'customerId': customer['id'], 'contractAmount': '200'}, expected=201)
+        other_path = f"/api/papers/{other['id']}"
+        other = self.call('POST', other_path + '/transactions', {'version': other['version'],
+                          'type': 'incoming_deposit', 'amount': '30', 'date': '2026-01-03'}, expected=201)
+        other = self.call('GET', other_path)
+        stale_version = paper['version']
+        paper = self.call('PUT', path, {'version': paper['version'], 'title': '其他页面已修改的论文'})
+        paper = self.call('GET', path)
+        self.call('DELETE', path, {'version': stale_version}, expected=409)
+        self.assertEqual(paper, self.call('GET', path))
+        self.deleted_paper_id = paper['id']
+        self.deleted_submission_ids = [item['id'] for item in paper['submissions']]
+        self.assertEqual(2, len(self.deleted_submission_ids))
+        self.assertEqual(2, len(paper['transactions']))
+        self.call('DELETE', path, {'version': paper['version']})
+        self.call('GET', path, expected=404)
+        for submission_id in self.deleted_submission_ids:
+            self.call('POST', path + '/submissions/' + submission_id + '/credentials', expected=404)
+        self.assertEqual([other['id']], [item['id'] for item in self.call('GET', '/api/papers')])
+        self.assertEqual(other, self.call('GET', other_path))
+        summary = self.call('GET', f"/api/customers/{customer['id']}")
+        self.assertEqual(1, summary['paperCount'])
+        self.assertEqual(20000, summary['contractCents'])
+        self.assertEqual(3000, summary['receivedCents'])
+        self.assertEqual(17000, summary['receivableCents'])
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        self.csrf = ''
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        self.assertEqual([other['id']], [item['id'] for item in self.call('GET', '/api/papers')])
+        self.call('GET', path, expected=404)
+        self.assertEqual(other, self.call('GET', other_path))
+        self.assertEqual(1, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
+
     def test_resubmission_journal_history_is_persistent_and_scoped_to_each_paper(self):
         self.setup_account()
         first = self.call('POST', '/api/papers', {'title': '同名论文'}, expected=201)
