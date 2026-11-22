@@ -1,0 +1,29 @@
+[Unit]
+Description=Paper Desk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paperdesk
+Group=paperdesk
+WorkingDirectory=/opt/paper-desk
+ExecStart=/bin/bash /opt/paper-desk/start.sh
+Environment=APP_PORT=8080
+Environment=APP_DATA=/opt/paper-desk/data
+Environment=APP_CONFIG=/opt/paper-desk/config/application.properties
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/paper-desk/data
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paper-desk
+
+[Install]
+WantedBy=multi-user.target

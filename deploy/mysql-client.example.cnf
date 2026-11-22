@@ -1,0 +1,9 @@
+# Copy to a private location and fill in the database credentials. On Linux use chmod 600.
+# This file is for mysql/mysqldump; application.properties remains the Java application configuration.
+[client]
+host=127.0.0.1
+port=3306
+user=paperdesk_app
+password=YOUR_DATABASE_PASSWORD
+default-character-set=utf8mb4
+# For a remote RDS endpoint, configure a trusted CA and ssl-mode=VERIFY_IDENTITY.

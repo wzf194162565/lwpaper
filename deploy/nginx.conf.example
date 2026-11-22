@@ -1,0 +1,39 @@
+# Nginx 1.20+; include from the http {} context (for example conf.d/paper-desk.conf).
+# Replace ALL paper.example.com occurrences and certificate paths before enabling.
+# The app validates loopback Host/Origin. This proxy validates the public Origin
+# first, then translates it to the local origin; do not remove the Origin check.
+map $http_origin $paperdesk_origin_allowed {
+    default 0;
+    "" 1;
+    "https://paper.example.com" 1;
+}
+
+server {
+    listen 80;
+    server_name paper.example.com;
+    if ($host != paper.example.com) { return 444; }
+    return 301 https://paper.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name paper.example.com;
+    ssl_certificate /etc/nginx/ssl/paper.example.com.pem;
+    ssl_certificate_key /etc/nginx/ssl/paper.example.com.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 12m;
+    if ($host != paper.example.com) { return 444; }
+    if ($paperdesk_origin_allowed = 0) { return 403; }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:8080;
+        proxy_set_header Origin http://127.0.0.1:8080;
+        proxy_set_header Connection "";
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_cookie_flags paper_session secure;
+    }
+}

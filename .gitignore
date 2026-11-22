@@ -1,0 +1,60 @@
+### IntelliJ IDEA ###
+.idea/
+*.iml
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+.kotlin
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+# Local encrypted business data, backups and generated files
+data/
+.test-data/
+.qa-data/
+.artifacts/
+*.class
+__pycache__/
+*.pyc
+config/application.properties
+config/*.local.properties
+.env
+.env.*
+!.env.example
+lib/*.jar
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.vault
+*.vault.bak
+*.sql.gz
+*.dump
+
+# Local screenshots may contain real customer information
+/img.png

@@ -1,0 +1,7 @@
+-- Run as a MySQL administrator on the target server after replacing the password.
+-- This only creates the application database/user and grants rights in this database.
+-- Existing accounts keep their existing password; no data or tables are dropped.
+CREATE DATABASE IF NOT EXISTS lunwen CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+CREATE USER IF NOT EXISTS 'paperdesk_app'@'127.0.0.1' IDENTIFIED BY 'YOUR_STRONG_DATABASE_PASSWORD';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES, SHOW VIEW, TRIGGER
+    ON lunwen.* TO 'paperdesk_app'@'127.0.0.1';
