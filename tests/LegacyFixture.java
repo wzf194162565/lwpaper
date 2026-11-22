@@ -1,7 +1,7 @@
 import java.nio.file.*;
 import java.util.*;
 
-/** Produces an encrypted fixture predating service types, optionally using the schema 2 shape. */
+/** Produces an encrypted fixture predating service types and customer deposit terms. */
 public class LegacyFixture {
     public static void main(String[] args) throws Exception {
         Vault vault = new Vault(Path.of(args[0]));
@@ -14,7 +14,10 @@ public class LegacyFixture {
         Map<String, Object> paper = service.create(input);
         service.addTransaction(Main.string(paper, "id"), Map.of("version", paper.get("version"), "type", "outgoing_deposit", "amount", "1200", "date", "2026-01-02"));
         vault.mutate(state -> {
-            for (Object item : Json.array(state.get("papers"))) Json.object(item).remove("serviceType");
+            for (Object item : Json.array(state.get("papers"))) {
+                Map<String, Object> old = Json.object(item);
+                old.remove("serviceType"); old.remove("contractDepositCents");
+            }
             if (args.length > 1 && args[1].equals("2")) return null;
             state.put("schema", 1); state.remove("customers");
             for (Object item : Json.array(state.get("papers"))) {

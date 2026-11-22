@@ -107,6 +107,9 @@ public final class PaperService {
         String submittedAt = Main.string(result, "submittedAt");
         if (!submittedAt.isEmpty() && LocalDate.parse(submittedAt).isAfter(LocalDate.now())) throw new ApiException(400, "投稿日期不能晚于今天；计划日期可填在跟进日期中");
         result.put("contractCents", input.containsKey("contractAmount") ? money(input, "contractAmount") : previous == null ? 0L : number(previous.get("contractCents")));
+        long contractDeposit = input.containsKey("contractDepositAmount") ? money(input, "contractDepositAmount") : previous == null ? 0L : number(previous.getOrDefault("contractDepositCents", 0));
+        if (contractDeposit < 0 || contractDeposit > number(result.get("contractCents"))) throw new ApiException(400, "约定收款定金不能超过服务费用");
+        result.put("contractDepositCents", contractDeposit);
         result.put("writerFeeCents", input.containsKey("writerFee") ? money(input, "writerFee") : previous == null ? 0L : number(previous.get("writerFeeCents")));
         BusinessService.applyWriting(input, values, result);
         if (input.containsKey("submissionPassword")) {
@@ -130,6 +133,8 @@ public final class PaperService {
             if (type.equals("outgoing_deposit") || type.equals("outgoing_balance")) writerPaid += amount;
         }
         long contract = number(paper.get("contractCents")), writerFee = number(paper.get("writerFeeCents"));
+        long deposit = number(paper.getOrDefault("contractDepositCents", 0));
+        result.put("contractDepositCents", deposit); result.put("contractBalanceCents", contract - deposit);
         result.put("receivedCents", received); result.put("paidCents", paid);
         result.put("contractReceivedCents", contractReceived); result.put("writerPaidCents", writerPaid);
         result.put("otherIncomeCents", received - contractReceived); result.put("otherExpenseCents", paid - writerPaid);
@@ -146,6 +151,7 @@ public final class PaperService {
         Instant.parse(Main.string(paper, "createdAt")); Instant.parse(Main.string(paper, "updatedAt"));
         Map<String, Object> input = new LinkedHashMap<>(paper);
         input.put("contractAmount", BigDecimal.valueOf(number(paper.get("contractCents")), 2).toPlainString());
+        input.put("contractDepositAmount", BigDecimal.valueOf(number(paper.getOrDefault("contractDepositCents", 0)), 2).toPlainString());
         input.put("writerFee", BigDecimal.valueOf(number(paper.get("writerFeeCents")), 2).toPlainString());
         fields(input, null);
         List<Object> transactions = Json.array(paper.get("transactions"));

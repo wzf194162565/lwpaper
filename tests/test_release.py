@@ -70,7 +70,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertFalse(any('Fixture' in name or 'Test' in name for name in jar.namelist()))
             self.assertIn('AccountRegistry.class', jar.namelist())
         for name in ('db/mysql/V001__initial_schema.sql', 'db/mysql/V002__customer_cooperation_date.sql',
-                     'db/mysql/V003__paper_service_type.sql', 'deploy/nginx.conf.example', 'deploy/paper-desk.service',
+                     'db/mysql/V003__paper_service_type.sql', 'db/mysql/V004__customer_payment_deposit.sql', 'deploy/nginx.conf.example', 'deploy/paper-desk.service',
                      'tools/backup_mysql.py', 'deploy/mysql-init.sql.example', 'deploy/backup.cron.example',
                      'config/mysql-client.example.cnf'):
             self.assertIn(name, self.files)
@@ -139,7 +139,10 @@ class ReleaseTest(unittest.TestCase):
                      expected=403, origin='https://untrusted.example')
                 csrf = call('POST', '/api/setup', {'username': 'release-admin', 'password': 'Package-test-2026'})['csrf']
                 paper = call('POST', '/api/papers', {'title': '部署包收支核验', 'serviceType': 'full',
-                    'contractAmount': '66000', 'writerFee': '43000'}, expected=201)
+                    'contractAmount': '66000', 'contractDepositAmount': '16000.50', 'writerFee': '43000'}, expected=201)
+                self.assertEqual(1600050, paper['contractDepositCents'])
+                self.assertEqual(4999950, paper['contractBalanceCents'])
+                self.assertEqual(0, paper['receivedCents'])
                 self.assertEqual(6600000, paper['receivableCents'])
                 self.assertEqual(4300000, paper['payableCents'])
                 path = f"/api/papers/{paper['id']}"
@@ -162,6 +165,8 @@ class ReleaseTest(unittest.TestCase):
             try:
                 csrf = call('POST', '/api/login', {'username': 'release-admin', 'password': 'Package-test-2026'})['csrf']
                 paper = call('GET', '/api/papers')[0]
+                self.assertEqual(1600050, paper['contractDepositCents'])
+                self.assertEqual(4999950, paper['contractBalanceCents'])
                 self.assertEqual(6500000, paper['receivableCents'])
                 self.assertEqual(1, len(paper['transactions']))
                 client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))

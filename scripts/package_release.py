@@ -13,7 +13,7 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB_FILES = ('index.html', 'app.js', 'business.js', 'styles.css', 'favicon.svg')
-SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql')
+SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql', 'V004__customer_payment_deposit.sql')
 
 
 def copy_file(source, target):

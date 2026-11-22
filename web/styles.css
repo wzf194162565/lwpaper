@@ -95,6 +95,7 @@ th{font-weight:var(--font-weight-semibold);line-height:1.65}
 .field-error{margin:5px 0 0;color:#ab3025;font-size:var(--font-size-small);line-height:1.6}
 .field-error[hidden],.required-mark[hidden]{display:none}
 .field [aria-invalid=true]{border-color:#bd5348;background:#fffafa;box-shadow:0 0 0 2px #bd534815}
+.field input[readonly]{background:#f3f6f5;color:#53666d;cursor:default}
 .error-message:not(:empty){padding:11px 13px;border:1px solid #edb8b0;border-left:4px solid #b64134;border-radius:7px;background:#fff3f0;color:#992d22;font-size:var(--font-size-body);line-height:1.65;overflow-wrap:anywhere}
 .error-message:empty{display:none}
 .form-feedback{width:100%;margin:0}

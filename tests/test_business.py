@@ -7,6 +7,57 @@ from test_system import ApiTestCase, ROOT
 
 
 class BusinessTest(ApiTestCase):
+    def test_customer_deposit_terms_persist_without_creating_payments(self):
+        self.setup_account()
+        customer = self.call('POST', '/api/customers', {'name': '定金约定客户'}, expected=201)
+        papers = []
+        for service in ('full', 'half'):
+            paper = self.call('POST', '/api/papers', {'title': service + '客户收款约定', 'serviceType': service,
+                              'customerId': customer['id'], 'contractAmount': '3000.10',
+                              'contractDepositAmount': '1000.05', 'contractBalanceAmount': '9999'}, expected=201)
+            path = f"/api/papers/{paper['id']}"
+            self.assertEqual(100005, paper['contractDepositCents'])
+            self.assertEqual(200005, paper['contractBalanceCents'])
+            self.assertEqual(0, paper['receivedCents'])
+            self.assertEqual(300010, paper['receivableCents'])
+            self.assertEqual([], paper['transactions'])
+            if service == 'full':
+                paper = self.call('PUT', path, {'version': paper['version'], 'writerFee': '500', 'writerDepositAmount': '100'})
+                self.assertEqual(10000, paper['writerDepositCents'])
+                self.assertEqual(100005, paper['contractDepositCents'])
+            paper = self.call('PUT', path, {'version': paper['version'], 'title': '更新题目-' + service})
+            self.assertEqual(100005, paper['contractDepositCents'])
+            for changes in ({'contractDepositAmount': '3000.11'}, {'contractAmount': '1000'},
+                            {'contractDepositAmount': '-1'}, {'contractDepositAmount': '0.001'}):
+                self.call('PUT', path, {'version': paper['version'], **changes}, expected=400)
+                self.assertEqual(paper['version'], self.call('GET', path)['version'])
+                self.assertEqual(100005, self.call('GET', path)['contractDepositCents'])
+            paper = self.call('POST', path + '/transactions', {'version': paper['version'], 'type': 'incoming_deposit',
+                              'amount': '250', 'date': '2026-01-01'}, expected=201)
+            self.assertEqual(25000, paper['receivedCents'])
+            self.assertEqual(275010, paper['receivableCents'])
+            self.assertEqual(100005, paper['contractDepositCents'])
+            paper = self.call('POST', path + '/submissions', {'version': paper['version'], 'journal': '改投期刊'}, expected=201)
+            self.assertEqual(100005, paper['contractDepositCents'])
+            self.assertEqual(200005, paper['contractBalanceCents'])
+            papers.append(paper)
+        backup = self.call('GET', '/api/backup', raw=True)
+        for paper in papers:
+            self.call('PUT', f"/api/papers/{paper['id']}", {'version': paper['version'], 'contractDepositAmount': '0'})
+        self.call('POST', '/api/restore', {'backup': base64.b64encode(backup).decode(), 'password': 'Test-password-2026'})
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        self.csrf = ''
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        restored = self.call('GET', '/api/papers')
+        self.assertEqual(2, len(restored))
+        for paper in restored:
+            self.assertEqual(100005, paper['contractDepositCents'])
+            self.assertEqual(200005, paper['contractBalanceCents'])
+            self.assertEqual(25000, paper['receivedCents'])
+
     def test_delete_paper_preserves_customer_and_other_papers_after_restart(self):
         self.setup_account()
         customer = self.call('POST', '/api/customers', {'name': '保留的客户'}, expected=201)
@@ -103,6 +154,8 @@ class BusinessTest(ApiTestCase):
         paper = self.call('GET', '/api/papers')[0]
         self.assertEqual('full', paper['serviceType'])
         self.assertEqual('旧写作者', paper['writer'])
+        self.assertEqual(0, paper['contractDepositCents'])
+        self.assertEqual(paper['contractCents'], paper['contractBalanceCents'])
         self.assertEqual(120000, paper['paidCents'])
         self.assertEqual(1, len(paper['submissions']))
         saved = self.call('PUT', f"/api/papers/{paper['id']}", {'version': paper['version'], 'title': '旧数据更新'})

@@ -95,7 +95,7 @@ sudoedit /opt/paper-desk/config/application.properties
 
 填写 `db.host`、`db.port`、`db.name`、`db.username`、`db.password`，保留 `app.storage=mysql`。同机部署填写 `127.0.0.1`、`3306`、`lunwen`、`paperdesk_app` 及刚设置的数据库密码。不要直接复制本机连接配置；服务器上的 `127.0.0.1` 指向服务器本身。使用 RDS 时在控制台创建数据库和账号，填写 ECS 可访问的 RDS 内网地址，并配置 RDS 白名单及对应数据库权限。
 
-建议预先建立独立数据库并使用该库的专用账号；程序需要该库的业务读写、建表、索引、外键及 ALTER 权限。启动会自动执行包内 V001–V003 升级脚本。远程数据库优先配置可信 TLS 证书和 `db.sslMode=VERIFY_IDENTITY`；模板中的 PREFERRED 是同机连接示例。独立投稿密钥默认生成在 `/opt/paper-desk/data/database.key`。
+建议预先建立独立数据库并使用该库的专用账号；程序需要该库的业务读写、建表、索引、外键及 ALTER 权限。启动会自动执行包内 V001–V004 升级脚本，V004 增加客户收款定金约定，旧记录默认 0，保留原服务费用与实际流水。远程数据库优先配置可信 TLS 证书和 `db.sslMode=VERIFY_IDENTITY`；模板中的 PREFERRED 是同机连接示例。独立投稿密钥默认生成在 `/opt/paper-desk/data/database.key`。
 
 然后执行上一段启动命令。连接失败时查看日志；程序不会自动从 MySQL 回退为文件模式。
 

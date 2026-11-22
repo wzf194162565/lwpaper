@@ -215,7 +215,7 @@ test('overview includes a future follow-up even when no record is due or within 
  const overview=nodes.get('#content').innerHTML;
  assert.match(overview,/近期需关注 <small>1 项/);assert.match(overview,/reminder-title[^>]*>未来跟进记录/);
  assert.ok(overview.includes(run("dateLabel(futureDate)+' 跟进'")));assert.ok(!overview.includes('暂无跟进计划'));
- assert.match(nodes.get('#root').innerHTML,/data-view="followups"[\s\S]*?class="nav-count">1<\/span>/);
+ assert.ok(!nodes.get('#root').innerHTML.includes('class="nav-count"'));
  assert.equal(run('state.papers.filter(due).length'),0);assert.equal(run('upcoming().length'),0);
  await clickAction(handlers,{action:'navigate',view:'followups'});
  assert.equal(run('filteredPapers().length'),1);assert.match(nodes.get('#results').innerHTML,/未来跟进记录/);
@@ -237,6 +237,10 @@ test('overview and follow-up tabs share dates, exclusions and nearest-plan order
  run("state.search='干扰筛选';state.status='已发表';state.from='2999-01-01';state.page=3;");
  await clickAction(handlers,{action:'navigate',view:'followups'});
  assert.equal(run('filteredPapers().length'),5);assert.equal(run('state.tab'),'all');assert.equal(run('state.search'),'');
+ const summary=run('followUpStats()');
+ for(const [label,count] of [['全部计划',5],['已逾期',1],['今天跟进',1],['未来 7 天',2]])assert.match(summary,new RegExp('class="stat-label">'+label+'[\\s\\S]*?class="stat-value ">'+count+'<span'));
+ for(const label of ['论文总数','累计已收款','累计已付款'])assert.ok(!summary.includes(label));
+ assert.ok(!nodes.get('#root').innerHTML.includes('class="nav-count"'));
  assert.equal(run("filteredPapers().map(p=>p.id).join(',')"),'paper-1,paper-2,paper-3,paper-4,paper-0');
  await clickAction(handlers,{action:'tab',tab:'due'});assert.equal(run('filteredPapers().length'),2);
  await clickAction(handlers,{action:'tab',tab:'upcoming'});assert.equal(run('filteredPapers().length'),2);
@@ -370,7 +374,7 @@ test('business CSV exports omit account passwords and private contact informatio
  let text=await run('globalThis.exported.blob').text();
  for(const secret of ['private-account','private@example.com','13800000000'])assert.ok(!text.includes(secret));
  assert.match(text,/投稿时长/);assert.match(text,/投稿题目/);
- run('exportManagedPapers()');text=await run('globalThis.exported.blob').text();assert.match(text,/约定定金/);assert.match(text,/已付尾款/);
+ run('exportManagedPapers()');text=await run('globalThis.exported.blob').text();assert.match(text,/收款定金/);assert.match(text,/写作定金/);assert.match(text,/已付尾款/);
  run('exportCustomers()');text=await run('globalThis.exported.blob').text();
  assert.ok(!text.includes('customer-private@example.com'));assert.ok(!text.includes('13800000003'));assert.match(text,/已发表期刊/);
 });
@@ -658,6 +662,7 @@ function validationForm(run,id,definitions,mode='') {
   const form={id:${JSON.stringify(id)},dataset:{mode:${JSON.stringify(mode)}},elements:[],querySelector(selector){
    if(selector==='[type=submit]')return submit;if(selector==='.error-message')return summary;return errors[selector]||null;
   }};
+  form.elements.namedItem=name=>form.elements.find(control=>control.name===name);
   for(const definition of ${JSON.stringify(definitions)}){
    const label={textContent:definition.label,mark:null,querySelector(selector){return selector==='.required-mark'?this.mark:null;},append(mark){this.mark=mark;}};
    const control={tagName:'INPUT',type:'text',required:false,disabled:false,checked:false,value:'',...definition,
@@ -732,6 +737,48 @@ test('cross-field mistakes highlight dates and deposits while a rejected save ke
  assert.equal(run('calls.length'),1);assert.match(fixture.summary.textContent,/数据库暂时不可用/);
  assert.equal(fixture.summary.focusCount,1);assert.equal(fixture.controls.title.value,'需要保留的题目');
  assert.equal(fixture.submit.disabled,false);assert.equal(fixture.submit.innerHTML,'保存');
+});
+
+test('customer deposit fields calculate the balance and prevent saving a deposit above the total',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ for(const serviceType of ['half','full']){
+  run(`state.papers[0].serviceType='${serviceType}';state.papers[0].contractCents=300010;state.papers[0].contractDepositCents=100005;openEditor(state.papers[0]);`);
+  const html=nodes.get('#overlay-root').innerHTML;
+  assert.match(html,/name="contractDepositAmount"[^>]*value="1000.05"/);
+  assert.match(html,/name="contractBalanceAmount"[^>]*value="2000.05"[^>]*readonly/);
+  assert.equal(html.includes('name="writerDepositAmount"'),serviceType==='full');
+ }
+ run("state.drawer={kind:'edit',paper:null};globalThis.calls=[];api=async(url,options)=>{calls.push({url,options});return state.papers[0];};finishSave=async()=>{};");
+ const fixture=validationForm(run,'paper-form',[
+  {name:'title',label:'论文题目',required:true,value:'客户定金测试'},
+  {name:'contractAmount',label:'服务费用（元）',type:'number',value:'3000.10'},
+  {name:'contractDepositAmount',label:'约定定金（元）',type:'number',value:'1000.05'},
+  {name:'contractBalanceAmount',label:'约定尾款（元）',type:'number',value:'0.00',readOnly:true},
+ ]);
+ await Promise.all(handlers.get('input').map(handler=>handler({target:fixture.controls.contractDepositAmount})));
+ assert.equal(fixture.controls.contractBalanceAmount.value,'2000.05');
+ fixture.controls.contractAmount.value='0.30';fixture.controls.contractDepositAmount.value='0.10';
+ await Promise.all(handlers.get('change').map(handler=>handler({target:fixture.controls.contractAmount})));
+ assert.equal(fixture.controls.contractBalanceAmount.value,'0.20');
+ fixture.controls.contractDepositAmount.value='1';
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),0);assert.match(fixture.summary.textContent,/定金不能超过服务费用/);
+ fixture.controls.contractDepositAmount.value='0.10';
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.equal(JSON.parse(run('calls[0].options.body')).contractDepositAmount,'0.10');
+});
+
+test('customer payment terms appear in details and exports independently from writer fees',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.papers=state.papers.slice(0,1);Object.assign(state.papers[0],{contractCents:300010,contractDepositCents:100005,contractBalanceCents:200005});state.view='papers';renderShell();");
+ assert.match(nodes.get('#results').innerHTML,/收款定金 ¥1,000.05 \/ 尾款 ¥2,000.05/);
+ assert.match(run('financeDetail(state.papers[0])'),/约定定金 ¥1,000.05 · 尾款 ¥2,000.05/);
+ run("download=(name,blob)=>{globalThis.exported={name,blob};};exportManagedPapers()");
+ let csv=await run('exported.blob').text();assert.match(csv,/收款定金（元）/);assert.match(csv,/收款尾款（元）/);assert.match(csv,/"3000.1","1000.05","2000.05"/);
+ run("state.financeType='balances';exportFinance()");csv=await run('exported.blob').text();assert.match(csv,/"1000.05","2000.05"/);
+ run("delete state.papers[0].contractDepositCents;openEditor(state.papers[0])");
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="contractDepositAmount"[^>]*value="0.00"/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="contractBalanceAmount"[^>]*value="3000.10"/);
 });
 
 test('zero payments and invalid email formats receive specific inline errors',async()=>{

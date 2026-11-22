@@ -125,6 +125,38 @@ class MysqlTest(ApiTestCase):
     test_full_and_half_workflows = test_business.BusinessTest.test_full_and_half_service_types_persist_with_independent_workflows
     test_service_type_validation = test_business.BusinessTest.test_service_type_validation_prevents_accidental_writing_data_loss
     test_schema2_backup_without_service_type = test_business.BusinessTest.test_schema2_backup_without_service_type_preserves_writing
+    test_customer_deposit_terms_persist_without_creating_payments = test_business.BusinessTest.test_customer_deposit_terms_persist_without_creating_payments
+
+    def test_customer_deposit_schema_upgrade_preserves_existing_data(self):
+        self.setup_account()
+        paper = self.call('POST', '/api/papers', {'title': '升级前的客户费用', 'contractAmount': '3000'}, expected=201)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('ALTER TABLE lw_paper DROP CHECK ck_paper_contract_deposit, DROP COLUMN contract_deposit_cents')
+        self.sql('DELETE FROM lw_schema_version WHERE version=4')
+        self.reset_client()
+        self.csrf = ''
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        path = f"/api/papers/{paper['id']}"
+        old = self.call('GET', path)
+        self.assertEqual(0, old['contractDepositCents'])
+        self.assertEqual(300000, old['contractBalanceCents'])
+        paper = self.call('PUT', path, {'version': old['version'], 'contractDepositAmount': '1000'})
+        self.assertEqual('100000', self.sql(f"SELECT contract_deposit_cents FROM lw_paper WHERE id='{paper['id']}'"))
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.sql(f"UPDATE lw_paper SET contract_deposit_cents=300001 WHERE id='{paper['id']}'")
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        # Retry after DDL completed but before the version was recorded.
+        self.sql('DELETE FROM lw_schema_version WHERE version=4')
+        self.reset_client()
+        self.csrf = ''
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        self.assertEqual(100000, self.call('GET', path)['contractDepositCents'])
+        self.assertEqual(200000, self.call('GET', path)['contractBalanceCents'])
+        self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=4'))
 
     def test_delete_paper_preserves_customer_and_other_papers_after_restart(self):
         test_business.BusinessTest.test_delete_paper_preserves_customer_and_other_papers_after_restart(self)

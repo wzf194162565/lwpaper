@@ -51,7 +51,7 @@ function managedPaperRow(p,index) {
  <td>${full?`${esc(p.writer||'尚未分配')}<div class="cell-sub">${writingBadge(p.writingStatus)}</div>`:'客户供稿<div class="cell-sub">无需安排写作</div>'}</td>
  <td>${full?`${dateLabel(p.writingStartAt)}<div class="cell-sub ${p.writingOverdue?'due-date':''}">交稿 ${dateLabel(p.writingDueAt)}${p.writingOverdue?' · 已逾期':''}</div>`:'—'}</td>
  <td>${full?`${dateLabel(p.writingDeliveredAt)}<div class="cell-sub">${daysLabel(p.writingDays)}</div>`:'—'}</td>
- <td class="cell-money">${yuan(p.contractCents)}<div class="cell-sub">${full?`稿酬 ${yuan(p.writerFeeCents)}`:'无需写作稿酬'}</div>${full?`<div class="cell-sub">约定定金 ${yuan(p.writerDepositCents)} / 尾款 ${yuan(p.writerBalanceCents)}</div>`:''}</td>
+ <td class="cell-money">${yuan(p.contractCents)}<div class="cell-sub">收款定金 ${yuan(p.contractDepositCents)} / 尾款 ${yuan((p.contractCents||0)-(p.contractDepositCents||0))}</div><div class="cell-sub">${full?`稿酬 ${yuan(p.writerFeeCents)}`:'无需写作稿酬'}</div>${full?`<div class="cell-sub">写作定金 ${yuan(p.writerDepositCents)} / 尾款 ${yuan(p.writerBalanceCents)}</div>`:''}</td>
  <td>${full?`<div>定金 ${yuan(p.outgoing_depositCents)}</div><div class="cell-sub">尾款 ${yuan(p.outgoing_balanceCents)} · 待付 ${yuan(p.payableCents)}</div>`:'—'}</td>
  <td><button class="text-btn" data-action="edit-paper" data-id="${esc(p.id)}">${icon('edit')}编辑</button><div class="cell-sub"><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">收支</button></div><div class="cell-sub"><button class="text-btn" data-action="${p.submissions?.length?'resubmit-paper':'new-submission'}" data-paper-id="${esc(p.id)}">${p.submissions?.length?'改投':'关联期刊'}${icon('chevron')}</button></div><div class="cell-sub"><button class="text-btn paper-delete" data-action="delete-paper" data-id="${esc(p.id)}">${icon('trash')}删除</button></div></td></tr>`;
 }
@@ -96,6 +96,12 @@ function renderCustomerResults() {
 }
 
 function openWritingEditor(p=null,customerId='') { openPaperEditor(p,p?.serviceType||'full',customerId); }
+function updateContractBalance(form) {
+ const controls=form?.elements,amount=controls?.namedItem?.('contractAmount'),deposit=controls?.namedItem?.('contractDepositAmount'),balance=controls?.namedItem?.('contractBalanceAmount');
+ if(!amount||!deposit||!balance)return;
+ const total=Number(amount.value||0),paid=Number(deposit.value||0);
+ balance.value=Number.isFinite(total)&&Number.isFinite(paid)?(Math.max(0,Math.round(total*100)-Math.round(paid*100))/100).toFixed(2):'0.00';
+}
 function openPaperEditor(p=null,serviceType='half',customerId='') {
  const full=serviceType==='full';
  clearTimeout(credentialTimer);state.drawer={kind:'edit',paper:p,serviceType};
@@ -117,7 +123,9 @@ function openPaperEditor(p=null,serviceType='half',customerId='') {
     ${field('title',full?'写作文章题目':'论文题目',p?.title,{required:true,full:true,max:300,placeholder:full?'填写写作题目，可关联多次投稿':'填写客户提供的文章题目'})}
     ${field('authors','作者',p?.authors,{max:200})}
     <div class="field"><label for="f-customerId">关联客户</label><select id="f-customerId" name="customerId">${customerOptions(p?.customerId||customerId,'暂不关联客户')}</select><small>如无客户信息，请先到客户管理中建立。</small></div>
-    ${field('contractAmount','向客户约定收取费用（元）',((p?.contractCents||0)/100).toFixed(2),{type:'number',hint:'整篇论文的服务费用，不因多次投稿重复计费'})}
+    ${field('contractAmount','服务费用（元）',((p?.contractCents||0)/100).toFixed(2),{type:'number',full:true,hint:'向客户收取的总费用。'})}
+    ${field('contractDepositAmount','约定定金（元）',((p?.contractDepositCents||0)/100).toFixed(2),{type:'number',hint:'不能超过服务费用。'})}
+    ${field('contractBalanceAmount','约定尾款（元）',(Math.max(0,(p?.contractCents||0)-(p?.contractDepositCents||0))/100).toFixed(2),{type:'number',readOnly:true,hint:'自动计算：服务费用 − 定金。'})}
     ${field('followUpAt','下次业务跟进日期',p?.followUpAt,{type:'date'})}
    </div></div>
    <div class="form-section"><h3 class="section-heading">${icon('link')}关联期刊</h3><div class="form-grid">
@@ -189,7 +197,7 @@ function exportManagedPapers() {
  const list=filteredManagedPapers();if(!validDateRange()||!list.length)return toast('当前筛选下没有可导出的论文',true);
  const writingKeys=['writer','writingStatus','writingStartAt','writingDueAt','writingDeliveredAt'];
  const moneyKeys=['writerFeeCents','writerDepositCents','writerBalanceCents','outgoing_depositCents','outgoing_balanceCents','payableCents'];
- csvDownload(`论文档案-${today()}.csv`,[['论文编号','论文题目','服务类型','客户','作者','关联期刊','建档日期','服务费用（元）','写作人','写作状态','开始日期','预计交稿','实际交稿','稿酬（元）','约定定金（元）','约定尾款（元）','已付定金（元）','已付尾款（元）','未付稿酬（元）'],...list.map(p=>[p.code,p.title,serviceLabel(p),p.customer,p.authors,p.journal,paperCreatedDate(p),(p.contractCents||0)/100,...writingKeys.map(key=>hasWriting(p)?p[key]||'':''),...moneyKeys.map(key=>hasWriting(p)?(p[key]||0)/100:'')])]);toast(`导出成功，共 ${list.length} 条`);
+ csvDownload(`论文档案-${today()}.csv`,[['论文编号','论文题目','服务类型','客户','作者','关联期刊','建档日期','服务费用（元）','收款定金（元）','收款尾款（元）','写作人','写作状态','开始日期','预计交稿','实际交稿','稿酬（元）','写作定金（元）','写作尾款（元）','已付定金（元）','已付尾款（元）','未付稿酬（元）'],...list.map(p=>[p.code,p.title,serviceLabel(p),p.customer,p.authors,p.journal,paperCreatedDate(p),(p.contractCents||0)/100,(p.contractDepositCents||0)/100,((p.contractCents||0)-(p.contractDepositCents||0))/100,...writingKeys.map(key=>hasWriting(p)?p[key]||'':''),...moneyKeys.map(key=>hasWriting(p)?(p[key]||0)/100:'')])]);toast(`导出成功，共 ${list.length} 条`);
 }
 function exportSubmissions() {
  const list=filteredSubmissions();if(!validDateRange()||!list.length)return toast('当前筛选下没有可导出的投稿',true);

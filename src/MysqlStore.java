@@ -210,6 +210,7 @@ public final class MysqlStore implements ApplicationStore {
                 execute(c,"INSERT IGNORE INTO lw_schema_version(version,description,checksum,installed_at) VALUES(1,?,?,UTC_TIMESTAMP(6))","客户、论文、写作、投稿、流水及角色关联初始结构",checksum);
                 migrateCustomerCooperationDate(c);
                 migratePaperServiceType(c);
+                migrateCustomerPaymentDeposit(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -243,6 +244,22 @@ public final class MysqlStore implements ApplicationStore {
             try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
         } else if(!column.equals("varchar:20:NO:full"))throw new IllegalStateException("论文服务类型字段格式不兼容，需要默认 full 的 VARCHAR(20) 非空字段");
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(3,?,?,UTC_TIMESTAMP(6))","论文全包与半包服务类型",checksum);
+    }
+    private void migrateCustomerPaymentDeposit(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V004__customer_payment_deposit.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=4");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V004 数据库迁移脚本校验不一致，请勿修改已发布的脚本");
+            return;
+        }
+        String column=scalar(c,"SELECT CONCAT(data_type,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_paper' AND column_name='contract_deposit_cents'");
+        if(column.isEmpty()) {
+            try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        } else if(!column.equals("bigint:NO:0"))throw new IllegalStateException("客户定金字段格式不兼容，需要默认 0 的 BIGINT 非空字段");
+        String constraint=scalar(c,"SELECT constraint_type FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='lw_paper' AND constraint_name='ck_paper_contract_deposit' AND enforced='YES'");
+        if(!constraint.equals("CHECK"))throw new IllegalStateException("客户定金金额约束缺失，请检查 V004 升级状态");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(4,?,?,UTC_TIMESTAMP(6))","客户收款定金约定",checksum);
     }
     private void seedRoles(Connection c)throws SQLException{
         String[][] roles={{"administrator","空间管理员","当前本机账号，负责全部业务"},{"manager","业务主管","预留：业务管理及任务分配"},{"writer","写作人员","预留：分配给自己的写作任务"},{"submission","投稿专员","预留：分配给自己的投稿记录"},{"finance","财务人员","预留：收支与费用管理"},{"readonly","只读人员","预留：授权范围内的只读查看"}};
