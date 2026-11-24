@@ -1,66 +1,71 @@
 import java.util.*;
 
-/** Publication fees are a separate paper cost; author-paid fees never enter our ledger. */
+/** Costs and cash are scoped to submissions; old ambiguous totals stay explicitly unallocated. */
 final class PublicationFees {
-    static final Set<String> MODES=Set.of("pending","included","free","author");
-    static String mode(Map<String,Object> paper) { return paper.containsKey("publicationFeeMode")?Main.string(paper,"publicationFeeMode"):"pending"; }
-    static long amount(Map<String,Object> paper) { return PaperService.number(paper.getOrDefault("publicationFeeCents",0)); }
-    static long paid(Map<String,Object> paper) { return WriterPayments.paid(paper,"outgoing_publication")-WriterPayments.paid(paper,"incoming_publication_refund"); }
-    static boolean hasTerms(Map<String,Object> input) { return input.containsKey("publicationFeeMode")||input.containsKey("publicationFeeAmount"); }
-    static void updateWithSubmission(Map<String,Object> input,Map<String,Object> paper,boolean required) {
-        if(!hasTerms(input)) {
-            if(!required)return;
-            input=Map.of("publicationFeeMode","pending");
-        }
-        Map<String,Object> next=new LinkedHashMap<>();applyTerms(input,paper,next);
-        recordChange(paper,next);paper.putAll(next);
+    static final Set<String> MODES=Set.of("pending","included","free","author"), TYPES=Set.of("outgoing_publication","incoming_publication_refund");
+    static List<Object> accounts(Map<String,Object> p){return p.get("publicationFees") instanceof List<?>?Json.array(p.get("publicationFees")):List.of();}
+    static Map<String,Object> bySubmission(Map<String,Object> p,String id){for(Object item:accounts(p)){Map<String,Object> a=Json.object(item);if(Main.string(a,"submissionId").equals(id)&&!Main.string(a,"legacy").equals("yes"))return a;}return null;}
+    static Map<String,Object> current(Map<String,Object> p){return bySubmission(p,Main.string(p,"activeSubmissionId"));}
+    static String mode(Map<String,Object> p){if(p.containsKey("publicationFees")){Map<String,Object>a=current(p);return a==null?"pending":Main.string(a,"mode");}return p.containsKey("publicationFeeMode")?Main.string(p,"publicationFeeMode"):"pending";}
+    static long amount(Map<String,Object> p){if(p.containsKey("publicationFees")){Map<String,Object>a=current(p);return a==null?0:PaperService.number(a.get("amountCents"));}return PaperService.number(p.getOrDefault("publicationFeeCents",0));}
+    static long paid(Map<String,Object> p){return WriterPayments.paid(p,"outgoing_publication")-WriterPayments.paid(p,"incoming_publication_refund");}
+    static long paid(Map<String,Object> p,String id){long total=0;for(Object item:Json.array(p.get("transactions"))){Map<String,Object>t=Json.object(item);if(Main.string(t,"publicationAccountId").equals(id)&&TYPES.contains(Main.string(t,"type")))total+=FinancialLedger.signed(t)*(Main.string(t,"type").equals("outgoing_publication")?1:-1);}return total;}
+    static Map<String,Object> find(Map<String,Object>p,String id){for(Object item:accounts(p))if(Main.string(Json.object(item),"id").equals(id))return Json.object(item);throw new ApiException(404,"投稿版面费记录不存在");}
+    static Map<String,Object> submission(Map<String,Object>p,String id){for(Object item:Json.array(p.get("submissions")))if(Main.string(Json.object(item),"id").equals(id))return Json.object(item);throw new ApiException(404,"关联投稿不存在");}
+    static Map<String,Object> account(String sub,String journal,String mode,long amount,boolean legacy){Map<String,Object>a=new LinkedHashMap<>();a.put("id",UUID.randomUUID().toString());a.put("submissionId",sub);a.put("journal",journal);a.put("mode",mode);a.put("amountCents",amount);a.put("settlementStatus","open");a.put("finalCents",0L);a.put("legacy",legacy?"yes":"");a.put("createdAt",PaperService.now());a.put("updatedAt",a.get("createdAt"));return a;}
+    static boolean migrateState(Map<String,Object>s){boolean changed=false;for(Object item:Json.array(s.get("papers")))changed|=initialize(Json.object(item));return changed;}
+    static boolean initialize(Map<String,Object>p){
+        if(p.containsKey("publicationFees"))return false;boolean legacy=Json.array(p.get("submissions")).size()>1;
+        Map<String,Object>a=account(legacy?"":Main.string(p,"activeSubmissionId"),legacy?"历史汇总（待核对归属）":Main.string(p,"journal"),mode(p),amount(p),legacy);
+        a.put("id",UUID.nameUUIDFromBytes((Main.string(p,"id")+"/legacy-publication-fee").getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+        if(!Main.string(p,"createdAt").isEmpty())a.put("createdAt",p.get("createdAt"));if(!Main.string(p,"updatedAt").isEmpty())a.put("updatedAt",p.get("updatedAt"));
+        p.put("publicationFees",new ArrayList<>(List.of(a)));
+        for(Object item:Json.array(p.get("transactions"))){Map<String,Object>t=Json.object(item);if(TYPES.contains(Main.string(t,"type"))&&Main.string(t,"publicationAccountId").isEmpty())t.put("publicationAccountId",a.get("id"));}return true;
     }
-    static void recordChange(Map<String,Object> paper,Map<String,Object> next) {
-        if(mode(paper).equals(mode(next))&&amount(paper)==amount(next))return;
-        Map<String,Object> event=new LinkedHashMap<>();event.put("at",PaperService.now());
-        event.put("action","更新版面费约定："+description(paper)+" → "+description(next));
-        for(String field:List.of("status","journal","submissionSystem","submissionUrl","submittedAt"))event.put(field,paper.get(field));
-        Json.array(paper.get("history")).add(event);
+    static boolean hasTerms(Map<String,Object>i){return i.containsKey("publicationFeeMode")||i.containsKey("publicationFeeAmount")||i.containsKey("publicationSettlementStatus");}
+    static void applyTerms(Map<String,Object>i,Map<String,Object>previous,Map<String,Object>result){String m=i.containsKey("publicationFeeMode")?PaperService.text(i,"publicationFeeMode",16):mode(previous);if(!MODES.contains(m))throw new ApiException(400,"请选择有效的版面费承担方式");long fee=m.equals("included")?(i.containsKey("publicationFeeAmount")?PaperService.money(i,"publicationFeeAmount"):amount(previous)):0;if(m.equals("included")&&fee<=0)throw new ApiException(400,"请填写我方承担的版面费金额；尚未确定请选择待确认");result.put("publicationFeeMode",m);result.put("publicationFeeCents",fee);}
+    static void mirror(Map<String,Object>p){Map<String,Object>a=current(p);p.put("publicationFeeMode",a==null?"pending":a.get("mode"));p.put("publicationFeeCents",a==null?0L:a.get("amountCents"));}
+    static void setTerms(Map<String,Object>a,Map<String,Object>i){
+        Map<String,Object>next=new LinkedHashMap<>();applyTerms(i,Map.of("publicationFeeMode",a.get("mode"),"publicationFeeCents",a.get("amountCents")),next);
+        if(Main.string(a,"settlementStatus").equals("confirmed")&&(!Objects.equals(a.get("mode"),next.get("publicationFeeMode"))||!Objects.equals(a.get("amountCents"),next.get("publicationFeeCents")))&&(!i.containsKey("publicationSettlementStatus")||!"confirmed".equals(i.get("publicationSettlementStatus"))))throw new ApiException(409,"已确认的期刊最终成本不能覆盖；如有错误，请重新确认最终成本并填写核对原因");
+        a.put("mode",next.get("publicationFeeMode"));a.put("amountCents",next.get("publicationFeeCents"));
+        if(i.containsKey("publicationSettlementStatus")){String status=PaperService.text(i,"publicationSettlementStatus",16);if(!Set.of("open","confirmed").contains(status))throw new ApiException(400,"请选择版面费结算状态");a.put("settlementStatus",status);if(status.equals("confirmed")){if(!Boolean.TRUE.equals(i.get("confirmPublicationFinal")))throw new ApiException(400,"请确认该期刊的最终版面费成本已核对");if(PaperService.text(i,"publicationFinalAmount",24).isEmpty())throw new ApiException(400,"请填写该期刊最终版面费成本，可填 0");a.put("finalCents",PaperService.money(i,"publicationFinalAmount"));if(PaperService.text(i,"reason",1000).isEmpty())throw new ApiException(400,"请填写确认期刊最终成本的依据");}}
+        a.put("updatedAt",PaperService.now());
     }
-    static String description(Map<String,Object> terms) {
-        return switch(mode(terms)) {
-            case "included" -> "我方承担 "+java.math.BigDecimal.valueOf(amount(terms),2).toPlainString()+" 元";
-            case "free" -> "无版面费";
-            case "author" -> "作者自理版面费";
-            default -> "版面费待确认";
-        };
+    static void onSubmissionAdded(Map<String,Object>p,Map<String,Object>s,Map<String,Object>i,boolean first){initialize(p);Map<String,Object>a=first?bySubmission(p,""):null;if(a!=null){a.put("submissionId",s.get("id"));a.put("journal",s.get("journal"));}else{a=account(Main.string(s,"id"),Main.string(s,"journal"),"pending",0,false);Json.array(p.get("publicationFees")).add(a);}if(hasTerms(i))setTerms(a,i);mirror(p);}
+    static boolean hasTransactions(Map<String,Object>p,String id){return Json.array(p.get("transactions")).stream().map(Json::object).anyMatch(t->Main.string(t,"publicationAccountId").equals(id));}
+    static void updateForSubmission(Map<String,Object>p,String sub,Map<String,Object>i,boolean changed){
+        initialize(p);Map<String,Object>a=bySubmission(p,sub);if(a==null){a=account(sub,Main.string(submission(p,sub),"journal"),"pending",0,false);Json.array(p.get("publicationFees")).add(a);}
+        if(changed&&hasTransactions(p,Main.string(a,"id")))throw new ApiException(409,"该投稿已有版面费流水，更换期刊请使用改投");
+        if(hasTerms(i))setTerms(a,i);else if(changed)setTerms(a,Map.of("publicationFeeMode","pending","publicationSettlementStatus","open"));a.put("journal",Main.string(submission(p,sub),"journal"));mirror(p);
     }
-    static void applyTerms(Map<String,Object> input,Map<String,Object> previous,Map<String,Object> result) {
-        String mode=input.containsKey("publicationFeeMode")?PaperService.text(input,"publicationFeeMode",16):mode(previous);
-        if(!MODES.contains(mode))throw new ApiException(400,"请选择有效的版面费承担方式");
-        long amount=mode.equals("included")?(input.containsKey("publicationFeeAmount")?PaperService.money(input,"publicationFeeAmount"):amount(previous)):0;
-        if(mode.equals("included")&&amount<=0)throw new ApiException(400,"请填写我方承担的版面费金额；尚未确定请选择待确认，无版面费请选择无版面费");
-        result.put("publicationFeeMode",mode);result.put("publicationFeeCents",amount);
+    static void updateCurrent(Map<String,Object>p,Map<String,Object>i){initialize(p);Map<String,Object>a=current(p);if(a==null){a=account(Main.string(p,"activeSubmissionId"),Main.string(p,"journal"),"pending",0,false);Json.array(p.get("publicationFees")).add(a);}if(hasTerms(i))setTerms(a,i);a.put("journal",Main.string(p,"journal"));mirror(p);}
+    static void update(Map<String,Object>p,Map<String,Object>i,String actor){
+        initialize(p);String id=PaperService.text(i,"publicationAccountId",36),sub=PaperService.text(i,"submissionId",36);Map<String,Object>a=id.isEmpty()?(sub.isEmpty()?current(p):bySubmission(p,sub)):find(p,id);
+        if(a==null){if(!sub.isEmpty())submission(p,sub);a=account(sub,sub.isEmpty()?Main.string(p,"journal"):Main.string(submission(p,sub),"journal"),"pending",0,false);Json.array(p.get("publicationFees")).add(a);}String before=descriptionAccount(a);
+        if(i.containsKey("assignSubmissionId")){String assign=PaperService.text(i,"assignSubmissionId",36);Map<String,Object>s=submission(p,assign),existing=bySubmission(p,assign);if(existing!=null&&existing!=a)throw new ApiException(409,"该投稿已有费用记录，请通过冲销重记拆分历史款项");if(!Main.string(a,"legacy").equals("yes"))throw new ApiException(400,"只有历史汇总费用可以核对归属");String reason=PaperService.text(i,"reason",1000);if(reason.isEmpty())throw new ApiException(400,"请填写核对历史费用归属的依据");a.put("submissionId",assign);a.put("journal",s.get("journal"));a.put("legacy","");FinancialLedger.audit(p,"fee_assign",Map.of("publicationAccountId",a.get("id")),actor,reason,"");}
+        setTerms(a,i);mirror(p);FinancialLedger.audit(p,"fee_update",Map.of("publicationAccountId",a.get("id")),actor,before+" → "+descriptionAccount(a),"");
     }
-    static void validateTransaction(Map<String,Object> paper,Map<String,Object> input,Map<String,Object> tx) {
-        String type=Main.string(tx,"type");
-        if(!Set.of("outgoing_publication","incoming_publication_refund").contains(type))return;
-        if(!Boolean.TRUE.equals(input.get("confirmPublicationPayment")))throw new ApiException(400,"请确认这笔版面费已经实际支付或退回");
-        if(type.equals("outgoing_publication")&&!mode(paper).equals("included"))throw new ApiException(400,"只有我方承担版面费时才能登记支付，作者自理不计入我方流水");
-        long limit=type.equals("outgoing_publication")?amount(paper)-paid(paper):paid(paper);
-        if(PaperService.number(tx.get("amountCents"))>Math.max(0,limit))throw new ApiException(400,"本次版面费金额不能超过剩余应付或已实际支付的金额");
+    static void beforeDeleteSubmission(Map<String,Object>p,String sub){initialize(p);Map<String,Object>a=bySubmission(p,sub);if(a!=null&&hasTransactions(p,Main.string(a,"id")))throw new ApiException(409,"这次投稿已有版面费流水，请保留投稿及财务记录");if(a!=null)Json.array(p.get("publicationFees")).remove(a);}
+    static boolean known(Map<String,Object>a){return Main.string(a,"settlementStatus").equals("confirmed")||!Main.string(a,"mode").equals("pending");}
+    static long cost(Map<String,Object>a){return PaperService.number(a.get(Main.string(a,"settlementStatus").equals("confirmed")?"finalCents":"amountCents"));}
+    static String descriptionAccount(Map<String,Object>a){return (Main.string(a,"journal").isEmpty()?"尚未关联投稿":Main.string(a,"journal"))+"："+(known(a)?java.math.BigDecimal.valueOf(cost(a),2).toPlainString()+" 元":"待确认")+(Main.string(a,"settlementStatus").equals("confirmed")?"（最终成本）":"");}
+    static String description(Map<String,Object>p){return mode(p)+" "+java.math.BigDecimal.valueOf(amount(p),2).toPlainString()+" 元";}
+    static void recordChange(Map<String,Object>p,Map<String,Object>next){if(mode(p).equals(mode(next))&&amount(p)==amount(next))return;Map<String,Object>e=new LinkedHashMap<>();e.put("at",PaperService.now());e.put("action","更新当前投稿版面费约定");for(String k:List.of("status","journal","submissionSystem","submissionUrl","submittedAt"))e.put(k,p.get(k));Json.array(p.get("history")).add(e);}
+    static void validateTransaction(Map<String,Object>p,Map<String,Object>i,Map<String,Object>t){
+        String type=Main.string(t,"type");if(!TYPES.contains(type))return;initialize(p);if(!Boolean.TRUE.equals(i.get("confirmPublicationPayment")))throw new ApiException(400,"请确认这笔版面费已经实际支付或退回");String id=PaperService.text(i,"publicationAccountId",36);if(id.isEmpty()){if(accounts(p).size()!=1)throw new ApiException(400,"请选择本次收付对应的投稿版面费记录");id=Main.string(Json.object(accounts(p).get(0)),"id");}Map<String,Object>a=find(p,id);long net=paid(p,id);if(type.equals("outgoing_publication")&&(!known(a)||cost(a)<=0))throw new ApiException(400,"请先确认该期刊由我方承担的版面费成本");long limit=type.equals("outgoing_publication")?cost(a)-net:net;if(PaperService.number(t.get("amountCents"))>Math.max(0,limit))throw new ApiException(400,"本次金额不能超过该期刊剩余应付或已实际支付的版面费");t.put("publicationAccountId",id);
     }
-    static void validateStored(Map<String,Object> paper) {
-        String mode=mode(paper);long amount=amount(paper);
-        if(!MODES.contains(mode)||amount<0||amount>100000000L||(!mode.equals("included")&&amount!=0)||paid(paper)<0)throw new IllegalArgumentException();
+    static void validateBalances(Map<String,Object>p){for(Object item:accounts(p))if(paid(p,Main.string(Json.object(item),"id"))<0)throw new ApiException(400,"该期刊退款将超过实际付款，请先核对后续退款记录");}
+    static void validateStored(Map<String,Object>p){
+        if(!p.containsKey("publicationFees")){String m=mode(p);long fee=amount(p);if(!MODES.contains(m)||fee<0||fee>100000000L||(!m.equals("included")&&fee!=0)||paid(p)<0)throw new IllegalArgumentException();return;}
+        if(!(p.get("publicationFees") instanceof List<?>)||accounts(p).size()>202)throw new IllegalArgumentException();Set<String>ids=new HashSet<>(),subs=new HashSet<>();
+        for(Object item:accounts(p)){Map<String,Object>a=Json.object(item);String id=Main.string(a,"id"),sub=Main.string(a,"submissionId"),m=Main.string(a,"mode");UUID.fromString(id);long fee=PaperService.number(a.get("amountCents")),fin=PaperService.number(a.get("finalCents"));if(!ids.add(id)||!MODES.contains(m)||fee<0||fee>100000000L||fin<0||fin>100000000L||(!m.equals("included")&&fee!=0)||m.equals("included")&&fee==0||!Set.of("open","confirmed").contains(Main.string(a,"settlementStatus")))throw new IllegalArgumentException();if(!sub.isEmpty()){submission(p,sub);if(!subs.add(sub))throw new IllegalArgumentException();}PaperService.text(a,"journal",200);java.time.Instant.parse(Main.string(a,"createdAt"));java.time.Instant.parse(Main.string(a,"updatedAt"));}
+        for(Object item:Json.array(p.get("transactions"))){Map<String,Object>t=Json.object(item);if(TYPES.contains(Main.string(t,"type"))&&!ids.contains(Main.string(t,"publicationAccountId")))throw new IllegalArgumentException();}validateBalances(p);
     }
-    static void enrich(Map<String,Object> paper,Map<String,Object> result) {
-        String mode=mode(paper);long fee=amount(paper),paid=paid(paper);
-        result.put("publicationFeeMode",mode);result.put("publicationFeeCents",fee);
-        result.put("publicationPaidCents",paid);result.put("publicationRefundedCents",WriterPayments.paid(paper,"incoming_publication_refund"));
-        boolean known=!mode.equals("pending");
-        result.put("publicationPayableCents",known?Math.max(0,fee-paid):0L);result.put("publicationRefundableCents",known?Math.max(0,paid-fee):0L);
-        long profit=ServiceTermination.customerTarget(paper)-ServiceTermination.writerTarget(paper)-fee+
-                    WriterPayments.paid(paper,"incoming_other")-WriterPayments.paid(paper,"outgoing_other");
-        boolean settled=known&&ServiceTermination.customerNet(paper)==ServiceTermination.customerTarget(paper)&&
-                ServiceTermination.writerNet(paper)==ServiceTermination.writerTarget(paper)&&paid==fee;
-        result.put("profitEstimateKnown",known);result.put("estimatedProfitCents",known?profit:null);
-        result.put("profitSettled",settled);result.put("settledProfitCents",settled?profit:null);
-        if(ServiceTermination.ended(paper))result.put("settlementComplete",Boolean.TRUE.equals(result.get("settlementComplete"))&&known&&paid==fee);
+    static void enrich(Map<String,Object>p,Map<String,Object>r){
+        initialize(p);long total=0,netPaid=0,payable=0,refund=0;boolean known=true,settled=true;List<Object>views=new ArrayList<>();
+        for(Object item:accounts(p)){Map<String,Object>a=Json.object(item),v=new LinkedHashMap<>(a);long target=cost(a),net=paid(p,Main.string(a,"id"));boolean k=known(a);total+=target;netPaid+=net;known&=k;settled&=k&&target==net;long due=k?Math.max(0,target-net):0,back=k?Math.max(0,net-target):0;payable+=due;refund+=back;v.put("costCents",target);v.put("paidCents",net);v.put("payableCents",due);v.put("refundableCents",back);v.put("known",k);v.put("current",a==current(p));v.put("settled",k&&target==net);views.add(v);}
+        r.put("publicationFees",views);r.put("publicationFeeMode",mode(p));r.put("publicationFeeCents",amount(p));r.put("publicationFeeTotalCents",total);r.put("publicationPaidCents",netPaid);r.put("publicationRefundedCents",WriterPayments.paid(p,"incoming_publication_refund"));r.put("publicationPayableCents",payable);r.put("publicationRefundableCents",refund);
+        long profit=ServiceTermination.customerTarget(p)-ServiceTermination.writerTarget(p)-total+WriterPayments.paid(p,"incoming_other")-WriterPayments.paid(p,"outgoing_other");settled&=ServiceTermination.customerNet(p)==ServiceTermination.customerTarget(p)&&ServiceTermination.writerNet(p)==ServiceTermination.writerTarget(p);r.put("profitEstimateKnown",known);r.put("estimatedProfitCents",known?profit:null);r.put("profitSettled",settled);r.put("settledProfitCents",settled?profit:null);if(ServiceTermination.ended(p))r.put("settlementComplete",Boolean.TRUE.equals(r.get("settlementComplete"))&&settled);
     }
 }

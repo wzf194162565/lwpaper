@@ -7,51 +7,32 @@ from test_system import ApiTestCase
 class PublicationFeesTest(ApiTestCase):
     def test_resubmission_reconfirms_fees_preserves_payments_and_updates_profit(self):
         self.setup_account()
-        pending=self.publication_paper(publicationFeeMode='pending')
-        self.assertIsNone(pending['estimatedProfitCents'])
         paper=self.publication_paper(publicationFeeMode='included',publicationFeeAmount='800')
         path='/api/papers/'+paper['id']
-        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'原期刊',
+        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'Original journal',
             'status':'已拒稿','submittedAt':datetime.date.today().isoformat()},expected=201)
         paper=self.publication_tx(paper,'outgoing_publication','300')
-        old=paper['submissions'][0];before=paper
-        self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'新期刊',
+        original=paper['submissions'][0];old_account=paper['publicationFees'][0]['id'];before=paper
+        self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'New journal',
             'publicationFeeMode':'included','publicationFeeAmount':'0'},expected=400)
         self.assertEqual(before,self.call('GET',path))
-        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'新期刊',
+        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'New journal',
             'publicationFeeMode':'included','publicationFeeAmount':'1200'},expected=201)
         paper=self.call('GET',path)
-        self.assertEqual((120000,30000,90000,680000),(paper['publicationFeeCents'],paper['publicationPaidCents'],
-            paper['publicationPayableCents'],paper['estimatedProfitCents']))
-        self.assertEqual(old,paper['submissions'][0])
-        self.assertEqual(before['transactions'],paper['transactions'])
-        self.assertTrue(any('800.00' in h['action'] and '1200.00' in h['action'] for h in paper['history']))
-        current=paper['submissions'][-1]
-        old_version=paper['version'];paper=self.publication_tx(paper,'outgoing_publication','100')
-        changes={'version':current['version'],'paperVersion':old_version,'journal':'再次更换期刊',
-            'publicationFeeMode':'included','publicationFeeAmount':'700'}
-        self.call('PUT',path+'/submissions/'+current['id'],changes,expected=409)
-        self.assertEqual(paper,self.call('GET',path))
-        changes['paperVersion']=paper['version']
-        self.call('PUT',path+'/submissions/'+current['id'],changes)
-        paper=self.call('GET',path)
-        self.assertEqual((70000,40000,30000,730000),(paper['publicationFeeCents'],paper['publicationPaidCents'],
-            paper['publicationPayableCents'],paper['estimatedProfitCents']))
-        self.call('PUT',path+'/submissions/'+old['id'],{'version':old['version'],
-            'paperVersion':paper['version'],'publicationFeeMode':'free'},expected=400)
-        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'费用尚不确定的新期刊',
-            'publicationFeeMode':'pending'},expected=201)
-        self.assertEqual('pending',paper['publicationFeeMode']);self.assertIsNone(paper['estimatedProfitCents'])
-        self.assertEqual(40000,paper['publicationPaidCents'])
-        self.assertEqual((0,0),(paper['publicationPayableCents'],paper['publicationRefundableCents']))
-        paper=self.publication_terms(paper,publicationFeeMode='included',publicationFeeAmount='600')
-        paper=self.call('PUT',path,{'version':paper['version'],'journal':'旧客户端更换期刊未填费用'})
-        self.assertEqual('pending',paper['publicationFeeMode']);self.assertIsNone(paper['estimatedProfitCents'])
-        paper=self.publication_terms(paper,publicationFeeMode='included',publicationFeeAmount='900')
+        self.assertEqual((200000,30000,170000,600000),(paper['publicationFeeTotalCents'],paper['publicationPaidCents'],paper['publicationPayableCents'],paper['estimatedProfitCents']))
+        self.assertEqual(original,paper['submissions'][0]);self.assertEqual(before['transactions'],paper['transactions'])
+        current=next(a for a in paper['publicationFees'] if a['current'])
+        paper=self.call('PUT',path+'/publication-fee',{'version':paper['version'],'publicationAccountId':old_account,
+            'publicationSettlementStatus':'confirmed','publicationFinalAmount':'300',
+            'confirmPublicationFinal':True,'reason':'核对原期刊不退费用'})
+        paper=self.publication_tx(paper,'outgoing_publication','100',publicationAccountId=current['id'])
         active=next(sub for sub in paper['submissions'] if sub['id']==paper['activeSubmissionId'])
-        self.call('DELETE',path+'/submissions/'+active['id'],{'version':active['version']})
-        paper=self.call('GET',path)
-        self.assertEqual('pending',paper['publicationFeeMode']);self.assertEqual(40000,paper['publicationPaidCents'])
+        self.call('PUT',path+'/submissions/'+active['id'],{'version':active['version'],'paperVersion':paper['version'],
+            'journal':'Cannot overwrite paid journal','publicationFeeMode':'included','publicationFeeAmount':'700'},expected=409)
+        self.call('DELETE',path+'/submissions/'+active['id'],{'version':active['version']},expected=409)
+        paper=self.call('PUT',path+'/publication-fee',{'version':paper['version'],'publicationAccountId':current['id'],
+            'publicationFeeMode':'included','publicationFeeAmount':'700'})
+        self.assertEqual((100000,40000,60000,700000),(paper['publicationFeeTotalCents'],paper['publicationPaidCents'],paper['publicationPayableCents'],paper['estimatedProfitCents']))
 
     def publication_paper(self, **changes):
         paper=self.call('POST','/api/papers',{'title':'版面费核算','serviceType':'full','publicationFeeMode':'free',
@@ -115,7 +96,7 @@ class PublicationFeesTest(ApiTestCase):
         self.assertEqual((0,50000,1000000-200000),(paper['publicationFeeCents'],paper['publicationRefundableCents'],paper['estimatedProfitCents']))
         paper=self.publication_tx(paper,'incoming_publication_refund','500')
         payment=next(tx for tx in paper['transactions'] if tx['type']=='outgoing_publication')
-        self.call('DELETE',path+'/transactions/'+payment['id'],{'version':paper['version']},expected=400)
+        self.call('POST',path+'/transactions/'+payment['id']+'/reversal',{'version':paper['version'],'reason':'检查退款关联','confirmReversal':True},expected=400)
         self.assertEqual(paper,self.call('GET',path))
         paper=self.publication_terms(paper,publicationFeeMode='included',publicationFeeAmount='600')
         paper=self.call('PUT',path,{'version':paper['version'],'title':'正常编辑不改变版面费','publicationFeeCents':1})

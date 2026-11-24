@@ -160,27 +160,28 @@ class BusinessTest(ApiTestCase):
         self.deleted_submission_ids = [item['id'] for item in paper['submissions']]
         self.assertEqual(2, len(self.deleted_submission_ids))
         self.assertEqual(2, len(paper['transactions']))
-        self.call('DELETE', path, {'version': paper['version']})
-        self.call('GET', path, expected=404)
+        self.call('DELETE', path, {'version': paper['version']}, expected=409)
+        self.assertEqual(paper, self.call('GET', path))
         for submission_id in self.deleted_submission_ids:
-            self.call('POST', path + '/submissions/' + submission_id + '/credentials', expected=404)
-        self.assertEqual([other['id']], [item['id'] for item in self.call('GET', '/api/papers')])
+            self.call('POST', path + f'/submissions/{submission_id}/credentials', expected=200)
+        self.assertEqual(2,len(self.call('GET','/api/papers')))
+        self.assertEqual({paper['id'],other['id']}, {item['id'] for item in self.call('GET', '/api/papers')})
         self.assertEqual(other, self.call('GET', other_path))
         summary = self.call('GET', f"/api/customers/{customer['id']}")
-        self.assertEqual(1, summary['paperCount'])
-        self.assertEqual(20000, summary['contractCents'])
-        self.assertEqual(3000, summary['receivedCents'])
-        self.assertEqual(17000, summary['receivableCents'])
+        self.assertEqual(2, summary['paperCount'])
+        self.assertEqual(120000, summary['contractCents'])
+        self.assertEqual(13000, summary['receivedCents'])
+        self.assertEqual(107000, summary['receivableCents'])
         self.process.terminate()
         self.process.wait(timeout=10)
         self.reset_client()
         self.csrf = ''
         self.start_server()
         self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
-        self.assertEqual([other['id']], [item['id'] for item in self.call('GET', '/api/papers')])
-        self.call('GET', path, expected=404)
+        self.assertEqual({paper['id'],other['id']}, {item['id'] for item in self.call('GET', '/api/papers')})
+        self.assertEqual(paper, self.call('GET', path))
         self.assertEqual(other, self.call('GET', other_path))
-        self.assertEqual(1, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
+        self.assertEqual(2, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
 
     def test_resubmission_journal_history_is_persistent_and_scoped_to_each_paper(self):
         self.setup_account()
@@ -271,7 +272,7 @@ class BusinessTest(ApiTestCase):
         self.assertEqual(450000, summary['contractCents'])
         self.assertEqual(100000, summary['writerFeeCents'])
         backup = self.call('GET', '/api/backup', raw=True)
-        self.call('DELETE', path, {'version': half['version']})
+        self.call('DELETE', path, {'version': half['version']},expected=409)
         self.call('POST', '/api/restore', {'backup': base64.b64encode(backup).decode(), 'password': 'Test-password-2026'})
         self.process.terminate()
         self.process.wait(timeout=10)
@@ -395,9 +396,8 @@ class BusinessTest(ApiTestCase):
         reloaded = self.call('GET', path)
         self.assertEqual(first_id, reloaded['activeSubmissionId'])
         self.assertEqual('期刊甲', reloaded['journal'])
-        self.call('DELETE', path, {'version': updated['version']})
-        self.assertEqual(0, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
-        self.call('DELETE', f"/api/customers/{customer['id']}", {'version': renamed['version']})
+        self.call('DELETE', path, {'version': updated['version']},expected=409)
+        self.assertEqual(1, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
 
 
     def test_submission_edits_keep_identity_count_and_current_pointer(self):

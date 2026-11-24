@@ -32,10 +32,11 @@ public final class AttachmentService {
         for(Object f:files(paper))if(Main.string(Json.object(f),"id").equals(id))return Json.object(f);
         throw new ApiException(404,"稿件文件不存在");
     }
+    static boolean receipt(Map<String,Object> file){return Main.string(file,"purpose").equals("receipt");}
     static String filename(String value) {
         if(value.isBlank()||value.length()>200||value.matches(".*[\\\\/:*?\"<>|\\p{Cntrl}].*"))throw new ApiException(400,"文件名无效，最多 200 个字符");
         String lower=value.toLowerCase(Locale.ROOT);
-        if(!lower.endsWith(".doc")&&!lower.endsWith(".docx")&&!lower.endsWith(".pdf"))throw new ApiException(400,"仅支持 DOC、DOCX、PDF 文件");
+        if(!lower.endsWith(".doc")&&!lower.endsWith(".docx")&&!lower.endsWith(".pdf")&&!lower.endsWith(".png")&&!lower.endsWith(".jpg")&&!lower.endsWith(".jpeg"))throw new ApiException(400,"支持 DOC、DOCX、PDF 及 PNG、JPG 凭证图片");
         return value;
     }
     Path blob(String id) { UUID.fromString(id);return directory.resolve(id+".bin"); }
@@ -80,33 +81,43 @@ public final class AttachmentService {
         if(lower.endsWith(".pdf"))valid=new String(head,StandardCharsets.US_ASCII).startsWith("%PDF-");
         if(lower.endsWith(".doc"))valid=Arrays.equals(head,new byte[]{(byte)0xd0,(byte)0xcf,0x11,(byte)0xe0,(byte)0xa1,(byte)0xb1,0x1a,(byte)0xe1});
         if(lower.endsWith(".docx"))try(ZipFile zip=new ZipFile(path.toFile())){valid=zip.getEntry("[Content_Types].xml")!=null&&zip.getEntry("word/document.xml")!=null;}catch(IOException ignored){}
+        if(lower.endsWith(".png")||lower.endsWith(".jpg")||lower.endsWith(".jpeg"))valid=javax.imageio.ImageIO.read(path.toFile())!=null;
         if(!valid)throw new ApiException(400,"文件内容与格式不符，请上传有效的 Word 或 PDF 文件");
     }
     Map<String,Object> upload(String paperId,String name,String note,long version,String uploadId,InputStream input) throws Exception {
+        return upload(paperId,name,note,version,uploadId,input,"");
+    }
+    Map<String,Object> upload(String paperId,String name,String note,long version,String uploadId,InputStream input,String transactionId) throws Exception {
+        boolean receipt=!transactionId.isEmpty();
+        if(!receipt&&!name.toLowerCase(Locale.ROOT).matches(".*\\.(docx?|pdf)$"))throw new ApiException(400,"稿件仅支持 DOC、DOCX、PDF，收支凭证请从对应流水上传");
         filename(name);if(note.length()>1000)throw new ApiException(400,"修改说明最多 1000 个字符");
         String id=uploadId.isEmpty()?UUID.randomUUID().toString():uploadId;
         try{if(!UUID.fromString(id).toString().equals(id))throw new IllegalArgumentException();}catch(IllegalArgumentException e){throw new ApiException(400,"上传标识无效");}
         synchronized(store) {
             Map<String,Object> before=store.read(),paper=PaperService.find(before,paperId);
-            for(Object f:files(paper))if(Main.string(Json.object(f),"id").equals(id))return PaperService.publicPaper(paper,true,before);
+            if(receipt)FinancialLedger.find(paper,transactionId);
+            for(Object f:files(paper))if(Main.string(Json.object(f),"id").equals(id)){if(!Main.string(Json.object(f),"transactionId").equals(transactionId))throw new ApiException(409,"上传标识已被其他记录使用");return PaperService.publicPaper(paper,true,before);}
             if(Files.exists(blob(id))||all(before).stream().anyMatch(f->Main.string(f,"id").equals(id)))throw new ApiException(409,"上传标识已使用，请重新选择文件");
             PaperService.checkVersion(paper,Map.of("version",version));
-            if(files(paper).size()>=200)throw new ApiException(400,"每篇论文最多保留 200 个文件版本");
+            if(files(paper).stream().map(Json::object).filter(f->receipt(f)==receipt).count()>=(receipt?1000:200))throw new ApiException(400,receipt?"每篇论文最多保留 1000 个凭证":"每篇论文最多保留 200 个稿件版本");
             Files.createDirectories(directory);Path plain=Files.createTempFile(directory,"upload-",".tmp");
             Path target=blob(id);boolean saved=false;
             try {
                 try(OutputStream output=Files.newOutputStream(plain)){copyLimited(input,output,maxBytes());}
                 long size=Files.size(plain);if(size==0)throw new ApiException(400,"不能上传空文件");checkContent(plain,name);
                 if(all(before).stream().mapToLong(f->PaperService.number(f.get("size"))).sum()+size>ACCOUNT_LIMIT)throw new ApiException(413,"当前账号附件容量上限为 512MB");
-                long revision=files(paper).stream().map(Json::object).mapToLong(f->PaperService.number(f.get("revision"))).max().orElse(0)+1;
+                long revision=files(paper).stream().map(Json::object).filter(f->receipt(f)==receipt).mapToLong(f->PaperService.number(f.get("revision"))).max().orElse(0)+1;
                 Map<String,Object> metadata=new LinkedHashMap<>(Map.of("id",id,"filename",name,"size",size,"sha256",hash(plain),"revision",revision,"note",note,"uploadedAt",Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS).toString()));
+                metadata.put("purpose",receipt?"receipt":"manuscript");metadata.put("transactionId",transactionId);metadata.put("uploadedBy",store.username());
                 encrypt(plain,target,key(true),id);
                 Map<String,Object> result=store.mutate(state->{
                     Map<String,Object> current=PaperService.find(state,paperId);PaperService.checkVersion(current,Map.of("version",version));
                     if(!current.containsKey("files"))current.put("files",new ArrayList<>());Json.array(current.get("files")).add(metadata);PaperService.touch(current);
-                    Map<String,Object> event=new LinkedHashMap<>();event.put("at",PaperService.now());event.put("action","上传稿件 V"+revision+"："+name);
+                    Map<String,Object> event=new LinkedHashMap<>();event.put("at",PaperService.now());event.put("action",(receipt?"上传收支凭证 ":"上传稿件 V"+revision+"：")+name);
                     for(String field:List.of("status","journal","submissionSystem","submissionUrl","submittedAt"))event.put(field,current.getOrDefault(field,""));
-                    Json.array(current.get("history")).add(event);return PaperService.publicPaper(current,true,state);
+                    Json.array(current.get("history")).add(event);
+                    if(receipt)FinancialLedger.audit(current,"receipt",FinancialLedger.find(current,transactionId),store.username(),note,id);
+                    return PaperService.publicPaper(current,true,state);
                 });saved=true;return result;
             }finally{Files.deleteIfExists(plain);if(!saved)Files.deleteIfExists(target);}
         }
@@ -128,14 +139,16 @@ public final class AttachmentService {
         for(Object item:Json.array(state.get("papers"))) {
             Map<String,Object> paper=Json.object(item);Set<Long> revisions=new HashSet<>();Set<String> local=new HashSet<>();
             if(paper.containsKey("files")&&!(paper.get("files") instanceof List<?>))throw new IllegalArgumentException();
-            if(files(paper).size()>200)throw new IllegalArgumentException();
+            if(files(paper).stream().map(Json::object).filter(f->!receipt(f)).count()>200||files(paper).size()>1200)throw new IllegalArgumentException();
             for(Object f:files(paper)) {
                 Map<String,Object> file=Json.object(f);String id=Main.string(file,"id");UUID.fromString(id);filename(Main.string(file,"filename"));
                 long size=PaperService.number(file.get("size")),revision=PaperService.number(file.get("revision"));total+=size;
-                if(!ids.add(id)||!local.add(id)||!revisions.add(revision)||revision<1||size<1||size>200L*1024*1024||Main.string(file,"note").length()>1000||!Main.string(file,"sha256").matches("[0-9a-f]{64}"))throw new IllegalArgumentException();
+                if(!ids.add(id)||!local.add(id)||!revisions.add(revision*(receipt(file)?-1:1))||revision<1||size<1||size>200L*1024*1024||Main.string(file,"note").length()>1000||!Main.string(file,"sha256").matches("[0-9a-f]{64}"))throw new IllegalArgumentException();
+                if(receipt(file))FinancialLedger.find(paper,Main.string(file,"transactionId"));
                 Instant.parse(Main.string(file,"uploadedAt"));
             }
-            for(Object s:Json.array(paper.get("submissions"))) { String id=Main.string(Json.object(s),"manuscriptId");if(!id.isEmpty()&&!local.contains(id))throw new IllegalArgumentException(); }
+            for(Object s:Json.array(paper.get("submissions"))) {String id=Main.string(Json.object(s),"manuscriptId");if(!id.isEmpty()&&(!local.contains(id)||receipt(find(paper,id))))throw new IllegalArgumentException();}
+            for(Object audit:FinancialLedger.audits(paper)){String fileId=Main.string(Json.object(audit),"fileId");if(!fileId.isEmpty()&&!local.contains(fileId))throw new IllegalArgumentException();}
         }
         if(total>ACCOUNT_LIMIT)throw new IllegalArgumentException();
     }

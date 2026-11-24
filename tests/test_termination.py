@@ -86,7 +86,7 @@ class TerminationTest(ApiTestCase):
         self.call('POST', path + '/transactions', {'version': paper['version'], 'type': 'outgoing_refund', 'amount': '500.01', 'date': datetime.date.today().isoformat(), 'confirmSettlementPayment': True}, expected=400)
         paper = self.termination_tx(paper, 'outgoing_refund', '500')
         receipt = next(tx for tx in paper['transactions'] if tx['type'] == 'incoming_deposit')
-        self.call('DELETE', path + '/transactions/' + receipt['id'], {'version': paper['version']}, expected=400)
+        self.call('POST', path + '/transactions/' + receipt['id'] + '/reversal', {'version': paper['version'],'reason':'检查冲销余额','confirmReversal':True}, expected=400)
         self.assertEqual(paper, self.call('GET', path))
         backup = self.call('GET', '/api/backup', raw=True)
         paper = self.call('PUT', path + '/termination', self.termination_input(paper, customerSettlement='1000', writerSettlement='800'))

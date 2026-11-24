@@ -42,7 +42,7 @@ public final class PaperService {
             paper.put("transactions", new ArrayList<>());
             paper.put("history", new ArrayList<>(List.of(event(paper, "建立论文档案"))));
             BusinessService.initializePaper(state, paper, input);
-            WriterPayments.apply(paper, input);
+            PublicationFees.initialize(paper);WriterPayments.apply(paper, input,FinancialLedger.actor(vault));
             records.add(paper);
             return publicPaper(paper, true, state);
         });
@@ -57,6 +57,7 @@ public final class PaperService {
             FinancialRules.validateCustomerTerms(paper,nextFields);
             validateFollowUp(nextFields, paper, input);
             boolean journalChanged=!Main.string(paper,"journal").equals(Main.string(nextFields,"journal"));
+            if(journalChanged){PublicationFees.initialize(paper);Map<String,Object> account=PublicationFees.current(paper);if(account!=null&&PublicationFees.hasTransactions(paper,Main.string(account,"id")))throw new ApiException(409,"当前投稿已有版面费流水，更换期刊请使用改投");}
             if(journalChanged&&!PublicationFees.hasTerms(input)) {
                 nextFields.put("publicationFeeMode","pending");nextFields.put("publicationFeeCents",0L);
             }
@@ -65,7 +66,9 @@ public final class PaperService {
             PublicationFees.recordChange(paper,nextFields);
             paper.putAll(nextFields); touch(paper);
             BusinessService.updatePaper(state, paper, input);
-            WriterPayments.apply(paper, input);
+            if(PublicationFees.hasTerms(input)||journalChanged)PublicationFees.updateCurrent(paper,Map.of("publicationFeeMode",nextFields.get("publicationFeeMode"),"publicationFeeAmount",BigDecimal.valueOf(number(nextFields.get("publicationFeeCents")),2).toPlainString()));
+            if(PublicationFees.hasTerms(input)||journalChanged)FinancialLedger.audit(paper,"fee_update",Map.of("publicationAccountId",PublicationFees.current(paper).get("id")),FinancialLedger.actor(vault),"论文表单更新费用："+PublicationFees.descriptionAccount(PublicationFees.current(paper)),"");
+            WriterPayments.apply(paper, input,FinancialLedger.actor(vault));
             if (changed) Json.array(paper.get("history")).add(event(paper, "更新投稿进度"));
             if (followUpChanged) {
                 String date=Main.string(paper,"followUpAt"),reason=Main.string(paper,"followUpReason");
@@ -79,6 +82,7 @@ public final class PaperService {
     public void delete(String id, Map<String, Object> input) throws Exception {
         vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
+            if(!Json.array(paper.get("transactions")).isEmpty())throw new ApiException(409,"该论文已有收支或财务留痕，请保留档案；账务更正请使用冲销");
             Json.array(state.get("papers")).remove(paper); return null;
         });
     }
@@ -94,8 +98,7 @@ public final class PaperService {
     public Map<String,Object> publicationFee(String id,Map<String,Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String,Object> paper=find(state,id);checkVersion(paper,input);
-            Map<String,Object> next=new LinkedHashMap<>();PublicationFees.applyTerms(input,paper,next);
-            PublicationFees.recordChange(paper,next);paper.putAll(next);touch(paper);
+            PublicationFees.update(paper,input,FinancialLedger.actor(vault));touch(paper);
             return publicPaper(paper,true,state);
         });
     }
@@ -110,7 +113,9 @@ public final class PaperService {
             PublicationFees.validateTransaction(paper,input,tx);
             if (input.containsKey("confirmWriterPayment") && !Boolean.TRUE.equals(input.get("confirmWriterPayment"))) throw new ApiException(400, "请确认本次金额已实际支付");
             if (Boolean.TRUE.equals(input.get("confirmWriterPayment"))) WriterPayments.validatePayment(paper, tx);
-            transactions.add(tx); touch(paper); return publicPaper(paper, true, state);
+            String correction=text(input,"correctsTransactionId",36);
+            if(!correction.isEmpty()){Map<String,Object> original=FinancialLedger.find(paper,correction);if(!Main.string(original,"reversalOf").isEmpty()||!FinancialLedger.reversed(paper,correction))throw new ApiException(400,"请先冲销原始流水，再重新登记");tx.put("correctsTransactionId",correction);}
+            FinancialLedger.record(paper,tx,FinancialLedger.actor(vault));touch(paper);return publicPaper(paper,true,state);
         });
     }
 
@@ -131,11 +136,13 @@ public final class PaperService {
     }
 
     public Map<String, Object> deleteTransaction(String id, String transactionId, Map<String, Object> input) throws Exception {
+        throw new ApiException(405,"收支流水不能直接删除，请填写原因后冲销，并按实际情况重新登记");
+    }
+
+    public Map<String,Object> reverseTransaction(String id,String transactionId,Map<String,Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
-            boolean removed = Json.array(paper.get("transactions")).removeIf(item -> Main.string(Json.object(item), "id").equals(transactionId));
-            if (!removed) throw new ApiException(404, "这笔收支已不存在");
-            ServiceTermination.validateLedger(paper);
+            PublicationFees.initialize(paper);FinancialLedger.reverse(paper,transactionId,input,FinancialLedger.actor(vault));
             touch(paper); return publicPaper(paper, true, state);
         });
     }
@@ -189,7 +196,7 @@ public final class PaperService {
         long received = 0, paid = 0, contractReceived = 0, writerPaid = 0;
         for (Object item : Json.array(paper.get("transactions"))) {
             Map<String, Object> tx = Json.object(item);
-            long amount = number(tx.get("amountCents"));
+            long amount = FinancialLedger.signed(tx);
             String type = Main.string(tx, "type");
             if (type.startsWith("incoming_")) received += amount; else paid += amount;
             if (type.equals("incoming_deposit") || type.equals("incoming_balance")) contractReceived += amount;
@@ -207,10 +214,12 @@ public final class PaperService {
         BusinessService.enrichPaper(paper, result, state);
         ServiceTermination.enrich(paper,result);
         PublicationFees.enrich(paper,result);
+        FinancialLedger.enrich(paper,result);
         return result;
     }
 
     static void validateStored(Map<String, Object> paper) {
+        FinancialLedger.validateStored(paper);
         ServiceTermination.validateStored(paper);
         PublicationFees.validateStored(paper);
         UUID.fromString(Main.string(paper, "id"));

@@ -341,18 +341,18 @@ class SystemTest(ApiTestCase):
         self.assertEqual(499990, paper['netCents'])
         self.call('PUT', path, self.payload(original), expected=409)
         paper = self.call('PUT', path, self.payload(paper, journal='测试期刊', status='已投稿', submittedAt='2026-01-02'))
-        self.assertEqual(2, len(paper['history']))
+        self.assertTrue(any(h['action']=='更新投稿进度' for h in paper['history']))
         self.assertEqual('private-secret-42', self.call('POST', path + '/credentials')['password'])
         listing = self.call('GET', '/api/papers')
         self.assertNotIn('submissionPassword', listing[0])
         self.assertNotIn('history', listing[0])
         txid = paper['transactions'][0]['id']
-        paper = self.call('DELETE', path + '/transactions/' + txid, {'version': paper['version']})
+        paper = self.call('POST', path + '/transactions/' + txid + '/reversal', {'version': paper['version'],'reason':'录入更正','confirmReversal':True})
         self.assertEqual(200001, paper['receivableCents'])
         paper = self.call('PUT', path, self.payload(paper, submissionPassword=''))
         self.assertFalse(paper['hasPassword'])
-        self.call('DELETE', path, {'version': paper['version']})
-        self.assertEqual([], self.call('GET', '/api/papers'))
+        self.call('DELETE', path, {'version': paper['version']},expected=409)
+        self.assertEqual(1,len(self.call('GET', '/api/papers')))
 
     def test_validation_and_failed_changes_are_atomic(self):
         self.setup_account()

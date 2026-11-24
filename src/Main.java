@@ -179,7 +179,7 @@ public class Main {
                     try{version=Long.parseLong(Objects.toString(ex.getRequestHeaders().getFirst("X-Paper-Version"),""));}catch(NumberFormatException e){throw new ApiException(400,"请提供论文版本号");}
                     String length=ex.getRequestHeaders().getFirst("Content-Length");
                     if(length!=null&&Long.parseLong(length)>AttachmentService.maxBytes())throw new ApiException(413,"文件超过允许大小");
-                    json(ex,201,new AttachmentService(vault).upload(id,decodedHeader(ex,"X-File-Name"),decodedHeader(ex,"X-File-Note"),version,Objects.toString(ex.getRequestHeaders().getFirst("X-Upload-Id"),""),ex.getRequestBody()));return;
+                    json(ex,201,new AttachmentService(vault).upload(id,decodedHeader(ex,"X-File-Name"),decodedHeader(ex,"X-File-Note"),version,Objects.toString(ex.getRequestHeaders().getFirst("X-Upload-Id"),""),ex.getRequestBody(),Objects.toString(ex.getRequestHeaders().getFirst("X-Transaction-Id"),"")));return;
                 }
                 if(parts.length==3&&parts[1].equals("files")&&method.equals("GET")) {
                     synchronized(vault) {
@@ -216,6 +216,7 @@ public class Main {
                 }
                 if (parts.length == 2 && parts[1].equals("credentials") && method.equals("POST")) { json(ex, 200, papers.credentials(id)); return; }
                 if (parts.length == 2 && parts[1].equals("transactions") && method.equals("POST")) { json(ex, 201, papers.addTransaction(id, body(ex))); return; }
+                if(parts.length==4&&parts[1].equals("transactions")&&parts[3].equals("reversal")&&method.equals("POST")){json(ex,200,papers.reverseTransaction(id,parts[2],body(ex)));return;}
                 if (parts.length == 3 && parts[1].equals("transactions") && method.equals("DELETE")) { json(ex, 200, papers.deleteTransaction(id, parts[2], body(ex))); return; }
             }
             if (path.equals("/api/backup") && method.equals("GET")) {
@@ -265,6 +266,7 @@ public class Main {
             case "/app.js" -> "app.js";
             case "/business.js" -> "business.js";
             case "/files.js" -> "files.js";
+            case "/ledger.js" -> "ledger.js";
             case "/styles.css" -> "styles.css";
             case "/favicon.svg" -> "favicon.svg";
             default -> throw new ApiException(404, "页面不存在");

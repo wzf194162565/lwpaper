@@ -69,10 +69,10 @@ class FinancialRulesTest(ApiTestCase):
         paper=self.call('GET',path);self.assertEqual((80000,1),(paper['contractReceivedCents'],len(paper['transactions'])))
         self.finance_tx(paper,'incoming_deposit','200.01',expected=400)
 
-    def test_deleting_receipt_reopens_balance_and_legacy_overpayments_remain_readable(self):
+    def test_reversing_receipt_reopens_balance_and_legacy_overpayments_remain_readable(self):
         self.setup_account();paper=self.finance_paper();path='/api/papers/'+paper['id']
         paper=self.finance_tx(paper,'incoming_deposit','1000');tx=paper['transactions'][0]
-        paper=self.call('DELETE',path+'/transactions/'+tx['id'],{'version':paper['version']})
+        paper=self.call('POST',path+'/transactions/'+tx['id']+'/reversal',{'version':paper['version'],'reason':'录入错误','confirmReversal':True})
         self.assertEqual((0,500000),(paper['contractReceivedCents'],paper['receivableCents']))
         paper=self.finance_tx(paper,'incoming_deposit','1000')
         backup=self.data/'legacy-receipt.vault';backup.write_bytes(self.call('GET','/api/backup',raw=True))
@@ -81,7 +81,7 @@ class FinancialRulesTest(ApiTestCase):
                         *[str(source) for source in (ROOT/'src').glob('*.java')],str(ROOT/'tests'/'LegacyFinanceFixture.java')],cwd=ROOT,check=True,capture_output=True)
         subprocess.run(['java','-cp',str(helper),'LegacyFinanceFixture',str(backup),'Test-password-2026'],cwd=ROOT,check=True,capture_output=True)
         self.call('POST','/api/restore',{'backup':base64.b64encode(backup.read_bytes()).decode(),'password':'Test-password-2026'})
-        paper=self.call('GET',path);self.assertEqual(2888800,paper['contractReceivedCents'])
+        paper=self.call('GET',path);self.assertEqual(2988800,paper['contractReceivedCents'])
         paper=self.call('PUT',path,{'version':paper['version'],'title':'保留旧金额，允许修改资料'})
-        self.assertEqual(2888800,paper['contractReceivedCents'])
+        self.assertEqual(2988800,paper['contractReceivedCents'])
         self.finance_tx(paper,'incoming_deposit','0.01',expected=400)

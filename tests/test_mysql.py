@@ -27,6 +27,8 @@ import test_customer_types
 import test_termination
 import test_financial_rules
 import test_publication_fees
+import test_logic_audit
+import test_cost_ledger
 
 
 def free_port():
@@ -37,6 +39,16 @@ def free_port():
 
 @unittest.skipUnless(os.environ.get('RUN_MYSQL_TESTS') == '1', 'Set RUN_MYSQL_TESTS=1 for isolated MySQL tests')
 class MysqlTest(ApiTestCase):
+    today = test_cost_ledger.CostLedgerTest.today
+    cost_paper = test_cost_ledger.CostLedgerTest.cost_paper
+    cost_transaction = test_cost_ledger.CostLedgerTest.cost_transaction
+    test_cost_resubmission = test_cost_ledger.CostLedgerTest.test_resubmission_never_reuses_old_payment_and_final_loss_counts_in_profit
+    test_cost_refund = test_cost_ledger.CostLedgerTest.test_refunds_and_reversal_limits_stay_inside_their_own_journal
+    test_cost_reversal = test_cost_ledger.CostLedgerTest.test_reversal_is_immutable_audited_and_reentry_is_linked
+    test_cost_receipt = test_cost_ledger.CostLedgerTest.test_receipts_are_separate_encrypted_and_survive_backup_and_restart
+    test_audit_duplicate_journal_entry_points = test_logic_audit.LogicAuditTest.test_paper_editor_cannot_bypass_duplicate_journal_validation
+    test_audit_submission_date_entry_points = test_logic_audit.LogicAuditTest.test_paper_progress_changes_require_actual_submission_dates_atomically
+    test_audit_initial_publication_dates = test_logic_audit.LogicAuditTest.test_new_published_papers_initialize_publication_dates_and_duration
     test_publication_resubmission = test_publication_fees.PublicationFeesTest.test_resubmission_reconfirms_fees_preserves_payments_and_updates_profit
     publication_paper = test_publication_fees.PublicationFeesTest.publication_paper
     publication_tx = test_publication_fees.PublicationFeesTest.publication_tx
@@ -63,7 +75,6 @@ class MysqlTest(ApiTestCase):
                 self.process.terminate();self.process.wait(timeout=10)
                 self.sql('DELETE FROM lw_schema_version WHERE version=9')
         restored=self.publication_terms(restored,publicationFeeMode='included',publicationFeeAmount='100')
-        restored=self.publication_tx(restored,'outgoing_publication','100')
         self.call('DELETE','/api/papers/'+restored['id'],{'version':restored['version']})
         self.assertEqual('0',self.sql('SELECT COUNT(*) FROM lw_paper_publication_fee'))
         self.assertEqual('0',self.sql('SELECT COUNT(*) FROM lw_financial_transaction'))
@@ -75,7 +86,7 @@ class MysqlTest(ApiTestCase):
     test_financial_cent_limits = test_financial_rules.FinancialRulesTest.test_zero_unspecified_installments_still_cap_totals_and_cents
     test_financial_term_changes = test_financial_rules.FinancialRulesTest.test_contract_changes_cannot_hide_recorded_receipts_and_failed_edits_are_atomic
     test_financial_concurrent_receipts = test_financial_rules.FinancialRulesTest.test_concurrent_or_retried_receipts_record_only_one_payment
-    test_financial_legacy_compatibility = test_financial_rules.FinancialRulesTest.test_deleting_receipt_reopens_balance_and_legacy_overpayments_remain_readable
+    test_financial_legacy_compatibility = test_financial_rules.FinancialRulesTest.test_reversing_receipt_reopens_balance_and_legacy_overpayments_remain_readable
     termination_paper = test_termination.TerminationTest.termination_paper
     termination_tx = test_termination.TerminationTest.termination_tx
     termination_input = test_termination.TerminationTest.termination_input
@@ -401,9 +412,12 @@ class MysqlTest(ApiTestCase):
         for table in ('lw_paper', 'lw_writing_task', 'lw_submission', 'lw_financial_transaction',
                       'lw_paper_history', 'lw_paper_current_submission'):
             column = 'id' if table == 'lw_paper' else 'paper_id'
-            self.assertEqual('0', self.sql(f"SELECT COUNT(*) FROM {table} WHERE {column}='{self.deleted_paper_id}'"), table)
+            expected={'lw_submission':2,'lw_financial_transaction':2}.get(table,1)
+            actual=int(self.sql(f"SELECT COUNT(*) FROM {table} WHERE {column}='{self.deleted_paper_id}'"))
+            self.assertGreaterEqual(actual,expected,table)
         ids = ','.join("'" + value + "'" for value in self.deleted_submission_ids)
-        self.assertEqual('0', self.sql(f"SELECT COUNT(*) FROM lw_submission_credential WHERE submission_id IN ({ids})"))
+        self.assertEqual('2', self.sql(f"SELECT COUNT(*) FROM lw_submission_credential WHERE submission_id IN ({ids})"))
+        self.assertGreaterEqual(int(self.sql(f"SELECT COUNT(*) FROM lw_financial_audit WHERE paper_id='{self.deleted_paper_id}'")),2)
 
     def test_half_papers_have_no_writing_task_and_schema_upgrade_preserves_old_tasks(self):
         self.setup_account()

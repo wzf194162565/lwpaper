@@ -2,9 +2,9 @@
 let fileTransferBusy=false;
 const fileUploadTokens=new WeakMap();
 function fileSize(bytes) { return bytes>=1024*1024?`${(bytes/1024/1024).toFixed(1)} MB`:`${Math.ceil(bytes/1024)} KB`; }
-function sortedManuscripts(p) { return [...(p?.files||[])].sort((a,b)=>b.revision-a.revision); }
+function sortedManuscripts(p) { return [...(p?.files||[])].filter(f=>f.purpose!=='receipt').sort((a,b)=>b.revision-a.revision); }
 function manuscriptShortcut(p) {
- const count=p.files?.length||0;
+ const count=sortedManuscripts(p).length;
  return `<div class="cell-sub"><button class="text-btn manuscript-shortcut" data-action="paper-files" data-id="${esc(p.id)}">${icon('document')}${count?`稿件 ${count} 个`:'上传稿件'}</button></div>`;
 }
 function uploadedManuscripts(p) {
@@ -17,10 +17,10 @@ function manuscriptSummary(p) {
 }
 function fileUploadFields(required=false,p=null) {
  const limit=state.fileMaxBytes||50*1024*1024;
- return `<div class="form-section"><h3 class="section-heading">${icon('document')}论文文件</h3>${required?'':uploadedManuscripts(p)}<div class="form-grid"><div class="field full"><label for="manuscript-file">${required?'上传新版本':p?.files?.length?'上传新版本（选填）':'上传稿件（选填）'}</label><input id="manuscript-file" type="file" accept=".doc,.docx,.pdf" ${required?'required':''}><small>支持 Word、PDF，单文件最多 ${fileSize(limit)}。${required?'每次上传保留为独立版本。':'选择文件后点击下方“保存”，保存后上传；已有版本继续保留。'}</small></div><div class="field full"><label for="manuscript-note">修改说明（选填）</label><textarea id="manuscript-note" maxlength="1000" rows="2" placeholder="例如：初稿、根据审稿意见修改、录用终稿"></textarea></div></div><div class="file-transfer-status" role="status" aria-live="polite" hidden><progress max="100" value="0" aria-label="文件上传进度"></progress><span></span></div></div>`;
+ return `<div class="form-section"><h3 class="section-heading">${icon('document')}论文文件</h3>${required?'':uploadedManuscripts(p)}<div class="form-grid"><div class="field full"><label for="manuscript-file">${required?'上传新版本':sortedManuscripts(p).length?'上传新版本（选填）':'上传稿件（选填）'}</label><input id="manuscript-file" type="file" accept=".doc,.docx,.pdf" ${required?'required':''}><small>支持 Word、PDF，单文件最多 ${fileSize(limit)}。${required?'每次上传保留为独立版本。':'选择文件后点击下方“保存”，保存后上传；已有版本继续保留。'}</small></div><div class="field full"><label for="manuscript-note">修改说明（选填）</label><textarea id="manuscript-note" maxlength="1000" rows="2" placeholder="例如：初稿、根据审稿意见修改、录用终稿"></textarea></div></div><div class="file-transfer-status" role="status" aria-live="polite" hidden><progress max="100" value="0" aria-label="文件上传进度"></progress><span></span></div></div>`;
 }
 function manuscriptOptions(p,selected='') {
- return `<option value="">暂不关联稿件</option>${[...(p?.files||[])].reverse().map(f=>`<option value="${esc(f.id)}" ${f.id===selected?'selected':''}>V${f.revision} · ${esc(f.filename)}</option>`).join('')}`;
+ return `<option value="">暂不关联稿件</option>${sortedManuscripts(p).reverse().map(f=>`<option value="${esc(f.id)}" ${f.id===selected?'selected':''}>V${f.revision} · ${esc(f.filename)}</option>`).join('')}`;
 }
 function manuscriptSelect(p,s) {
  return `<div class="field full"><label for="submission-manuscript">本次投稿稿件</label><select id="submission-manuscript" name="manuscriptId">${manuscriptOptions(p,s?.manuscriptId)}</select><small>选择本次实际使用的版本。后续上传新稿将保留此次关联。</small></div>`;
@@ -63,10 +63,13 @@ async function uploadManuscript(p,file,form) {
 }
 document.addEventListener('submit',async event=>{
  const form=event.target;if(form.id!=='file-form')return;event.preventDefault();const button=$('[type=submit]',form);if(button.disabled||fileTransferBusy)return;
- const label=button.innerHTML;button.disabled=true;button.innerHTML='上传中…';
+ const origin=saveContext(),label=button.innerHTML;button.disabled=true;button.innerHTML='上传中…';
  try {
   const file=selectedManuscript(form);if(!file)throw new Error('请选择稿件文件');
-  const updated=await uploadManuscript(state.drawer.paper,file,form);
-  state.papers=state.papers.map(p=>p.id===updated.id?updated:p);state.drawer={kind:'detail',paper:updated,tab:'files'};renderShell();renderDetail();toast('稿件上传成功');
+  const updated=await uploadManuscript(origin.drawer.paper,file,form);
+  if(origin.csrf!==state.csrf)return;
+  dataLoadSequence++;
+  state.papers=state.papers.map(p=>p.id===updated.id?updated:p);
+  if(origin.current()){state.drawer={kind:'detail',paper:updated,tab:'files'};renderDetail();}renderShell();toast('稿件上传成功');
  }catch(error){showFormError(form,error.message);}finally{if(button.isConnected){button.disabled=false;button.innerHTML=label;}}
 });

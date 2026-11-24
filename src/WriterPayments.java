@@ -6,7 +6,7 @@ final class WriterPayments {
         long amount = 0;
         for (Object item : Json.array(paper.get("transactions"))) {
             Map<String, Object> tx = Json.object(item);
-            if (Main.string(tx, "type").equals(type)) amount += PaperService.number(tx.get("amountCents"));
+            if (Main.string(tx, "type").equals(type)) amount += FinancialLedger.signed(tx);
         }
         return amount;
     }
@@ -30,7 +30,7 @@ final class WriterPayments {
         if (amount > limit) throw new ApiException(400, type.equals("outgoing_deposit") ? "本次支付定金不能超过剩余约定定金，请核对费用约定" : "本次支付尾款不能超过剩余约定尾款，请核对费用约定");
     }
 
-    static void apply(Map<String, Object> paper, Map<String, Object> input) {
+    static void apply(Map<String, Object> paper, Map<String, Object> input,String actor) {
         if (!input.containsKey("writerPayments")) return;
         if (!(input.get("writerPayments") instanceof List<?> payments) || payments.size() > 2) throw new ApiException(400, "本次写作付款资料不正确");
         if (payments.isEmpty()) return;
@@ -43,7 +43,7 @@ final class WriterPayments {
             if (!types.add(Main.string(payment, "type"))) throw new ApiException(400, "定金和尾款本次各登记一次，请核对金额");
             Map<String, Object> tx = PaperService.transaction(paper, payment);
             validatePayment(paper, tx);
-            Json.array(paper.get("transactions")).add(tx);
+            FinancialLedger.record(paper,tx,actor);
         }
     }
 }

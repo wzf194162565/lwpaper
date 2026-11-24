@@ -24,13 +24,15 @@ final class MysqlStateMapper {
     static final Table WRITING = table("lw_writing_task", "id",s("id","id"),s("paper_id","paperId"),s("writer_name","writer"),s("status","writingStatus"),d("start_at","writingStartAt"),d("due_at","writingDueAt"),d("delivered_at","writingDeliveredAt"),n("fee_cents","writerFeeCents"),n("deposit_cents","writerDepositCents"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table SUBMISSIONS = table("lw_submission", "id",s("id","id"),s("paper_id","paperId"),s("title","title"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),s("status","status"),s("manuscript_id","manuscriptId"),d("submitted_at","submittedAt"),d("ended_at","endedAt"),d("published_at","publishedAt"),s("notes","notes"),n("sort_order","sortOrder"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table CREDENTIALS = table("lw_submission_credential", "submission_id",s("submission_id","id"),s("account_name","submissionAccount"),new Column("password_ciphertext","submissionPassword",Kind.SECRET),s("key_fingerprint","keyFingerprint"),s("bound_email","boundEmail"),s("bound_phone","boundPhone"),t("updated_at","updatedAt"));
-    static final Table TRANSACTIONS = table("lw_financial_transaction", "id",s("id","id"),s("paper_id","paperId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),t("created_at","createdAt"));
+    static final Table TRANSACTIONS = table("lw_financial_transaction", "id",s("id","id"),s("paper_id","paperId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),s("actor","actor"),s("reversal_of","reversalOf"),s("reversal_reason","reversalReason"),s("corrects_transaction_id","correctsTransactionId"),s("publication_account_id","publicationAccountId"),t("created_at","createdAt"));
     static final Table HISTORY = table("lw_paper_history", "id",s("id","id"),s("paper_id","paperId"),s("submission_ref","submissionId"),s("action","action"),s("status","status"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),d("submitted_at","submittedAt"),n("sort_order","sortOrder"),t("event_at","at"));
     static final Table CURRENT = table("lw_paper_current_submission", "paper_id",s("paper_id","paperId"),s("submission_id","submissionId"));
-    static final Table FILES = table("lw_paper_file","id",s("id","id"),s("paper_id","paperId"),s("filename","filename"),n("size_bytes","size"),s("sha256","sha256"),n("revision","revision"),s("note","note"),t("uploaded_at","uploadedAt"));
+    static final Table FILES = table("lw_paper_file","id",s("id","id"),s("paper_id","paperId"),s("filename","filename"),n("size_bytes","size"),s("sha256","sha256"),n("revision","revision"),s("note","note"),s("purpose","purpose"),s("transaction_id","transactionId"),s("uploaded_by","uploadedBy"),t("uploaded_at","uploadedAt"));
     static final Table TERMINATIONS=table("lw_paper_service_termination","paper_id",s("paper_id","paperId"),d("terminated_at","terminatedAt"),s("reason","reason"),n("customer_cents","customerCents"),n("writer_cents","writerCents"),t("updated_at","updatedAt"));
     static final Table PUBLICATION_FEES=table("lw_paper_publication_fee","paper_id",s("paper_id","paperId"),s("mode","publicationFeeMode"),n("amount_cents","publicationFeeCents"),t("updated_at","updatedAt"));
-    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,TRANSACTIONS,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES);
+    static final Table COST_ACCOUNTS=table("lw_publication_account","id",s("id","id"),s("paper_id","paperId"),s("submission_id","submissionId"),s("journal","journal"),s("mode","mode"),n("amount_cents","amountCents"),s("settlement_status","settlementStatus"),n("final_cents","finalCents"),s("legacy","legacy"),t("created_at","createdAt"),t("updated_at","updatedAt"));
+    static final Table FINANCIAL_AUDIT=table("lw_financial_audit","id",s("id","id"),s("paper_id","paperId"),s("action","action"),s("actor","actor"),t("event_at","at"),s("transaction_id","transactionId"),s("reversal_of","reversalOf"),s("corrects_transaction_id","correctsTransactionId"),s("publication_account_id","publicationAccountId"),s("file_id","fileId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),s("reason","reason"));
+    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,COST_ACCOUNTS,TRANSACTIONS,FINANCIAL_AUDIT,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES);
 
     MysqlStateMapper(String workspace, DatabaseCrypto crypto) throws Exception { this.workspace=workspace;this.crypto=crypto;fingerprint=crypto.fingerprint(); }
 
@@ -43,6 +45,7 @@ final class MysqlStateMapper {
         for(Object item:papers) {
             Map<String,Object> p=Json.object(item);byPaper.put(Main.string(p,"id"),p);
             p.put("transactions",new ArrayList<>());p.put("history",new ArrayList<>());p.put("submissions",new ArrayList<>());p.put("files",new ArrayList<>());p.put("activeSubmissionId","");
+            p.put("publicationFees",new ArrayList<>());p.put("financialAudit",new ArrayList<>());
             for(String field:List.of("writer","writingStartAt","writingDueAt","writingDeliveredAt"))p.put(field,"");
             p.put("writingStatus",BusinessService.hasWriting(p)?"待分配":"");p.put("writerFeeCents",0L);p.put("writerDepositCents",0L);
             String customerId=Main.string(p,"customerId");p.put("customer",customerId.isEmpty()?"":byCustomer.get(customerId).get("name"));
@@ -80,6 +83,8 @@ final class MysqlStateMapper {
             Map<String,Object> paper=required(byPaper,Main.string(fee,"paperId"));
             paper.put("publicationFeeMode",fee.get("publicationFeeMode"));paper.put("publicationFeeCents",fee.get("publicationFeeCents"));
         }
+        for(Map<String,Object> account:readTable(connection,COST_ACCOUNTS,"created_at,id")){String parent=Main.string(account,"paperId");account.remove("paperId");Json.array(required(byPaper,parent).get("publicationFees")).add(account);}
+        for(Map<String,Object> event:readTable(connection,FINANCIAL_AUDIT,"event_at,id")){String parent=Main.string(event,"paperId");event.remove("paperId");Json.array(required(byPaper,parent).get("financialAudit")).add(event);}
         return state;
     }
 
@@ -157,6 +162,8 @@ final class MysqlStateMapper {
             Map<String,Object> paper=new LinkedHashMap<>(Json.object(item));paper.put("serviceType",BusinessService.serviceType(paper));
             String id=Main.string(paper,"id");add(result,PAPERS,paper);
             if(paper.containsKey("publicationFeeMode")) { Map<String,Object> fee=new LinkedHashMap<>(paper);fee.put("paperId",id);add(result,PUBLICATION_FEES,fee); }
+            for(Object itemAccount:PublicationFees.accounts(paper)){Map<String,Object> account=new LinkedHashMap<>(Json.object(itemAccount));account.put("paperId",id);add(result,COST_ACCOUNTS,account);}
+            for(Object itemAudit:FinancialLedger.audits(paper)){Map<String,Object> audit=new LinkedHashMap<>(Json.object(itemAudit));audit.put("paperId",id);add(result,FINANCIAL_AUDIT,audit);}
             if(ServiceTermination.ended(paper)) { Map<String,Object> closure=new LinkedHashMap<>(Json.object(paper.get("termination")));closure.put("paperId",id);add(result,TERMINATIONS,closure); }
             for(Object file:AttachmentService.files(paper)) { Map<String,Object> f=new LinkedHashMap<>(Json.object(file));f.put("paperId",id);add(result,FILES,f); }
             if(BusinessService.hasWriting(paper)) { Map<String,Object> writing=new LinkedHashMap<>(paper);writing.put("paperId",id);add(result,WRITING,writing); }
@@ -187,7 +194,7 @@ final class MysqlStateMapper {
                 default -> Main.string(source,column.field);
             };
             if(column.sql.equals(table.key))key=value.toString();
-            if((column.kind==Kind.DATE||Set.of("customer_id","submission_ref").contains(column.sql))&&value.toString().isEmpty())value=null;
+            if((column.kind==Kind.DATE||Set.of("customer_id","submission_ref","submission_id","transaction_id","reversal_of","corrects_transaction_id","publication_account_id","file_id").contains(column.sql))&&value.toString().isEmpty())value=null;
             values.put(column.sql,value);
         }
         if(key.isEmpty()||output.get(table).put(key,new Row(key,values))!=null)throw new IllegalArgumentException("Duplicate or empty entity ID in "+table.name);

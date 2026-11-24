@@ -1,4 +1,5 @@
 @charset "UTF-8";
+.publication-account{padding:16px 0;border-top:1px solid var(--line)}.publication-account>.panel-header{padding:0;margin-bottom:12px}.publication-account>.actions{margin-top:12px;flex-wrap:wrap}.ledger-row-actions{margin-top:10px;flex-wrap:wrap;gap:8px}.transaction-reversal{background:#f7f8fa}.ledger-audit{margin-top:28px;border-top:1px solid var(--line);padding-top:20px}.ledger-audit .panel-header{padding:0 0 15px}.ledger-audit article{padding:12px 0;border-bottom:1px solid var(--line);line-height:1.8;font-size:13px;overflow-wrap:anywhere}.ledger-audit article p,.ledger-audit article small{color:var(--muted)}
 .auth-nav{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0 28px;padding:5px;background:#f3f6f3;border-radius:10px}
 .auth-nav .tab{flex:1;margin:0;background:transparent;color:#6b8073;font-size:var(--font-size-body);justify-content:center}
 .auth-nav .tab.active{background:var(--green);color:#fff}

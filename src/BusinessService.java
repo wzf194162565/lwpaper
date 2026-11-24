@@ -16,7 +16,7 @@ public final class BusinessService {
     public BusinessService(BusinessStore vault) { this.vault = vault; }
 
     static boolean migrate(Map<String, Object> state) {
-        if (!Objects.toString(state.get("schema"), "").equals("1")) return false;
+        if (!Objects.toString(state.get("schema"), "").equals("1")) return PublicationFees.migrateState(state);
         state.put("customers", new ArrayList<>());
         for (Object item : Json.array(state.get("papers"))) {
             Map<String, Object> paper = Json.object(item);
@@ -32,6 +32,7 @@ public final class BusinessService {
             syncCurrent(paper);
         }
         state.put("schema", 2);
+        PublicationFees.migrateState(state);
         return true;
     }
 
@@ -40,6 +41,7 @@ public final class BusinessService {
         linkCustomer(state, paper, input);
         if (hasLegacySubmission(paper)) {
             Map<String, Object> submission = legacySubmission(paper);
+            autoEndDates(submission); validateSubmissionDates(submission, true);
             Json.array(paper.get("submissions")).add(submission);
             paper.put("activeSubmissionId", submission.get("id"));
         }
@@ -52,13 +54,20 @@ public final class BusinessService {
             Map<String, Object> current = current(paper);
             if (current == null && hasLegacySubmission(paper)) {
                 current = legacySubmission(paper);
+                autoEndDates(current); validateSubmissionDates(current, true);
                 Json.array(paper.get("submissions")).add(current);
                 paper.put("activeSubmissionId", current.get("id"));
             } else if (current != null) {
                 Map<String, Object> before = new LinkedHashMap<>(current);
                 for (String field : SUBMISSION_FIELDS) current.put(field, paper.get(field));
                 if (!before.equals(current)) {
-                    autoEndDates(current); validateSubmissionDates(current, false); PaperService.touch(current);
+                    boolean journalChanged = !journalKey(Main.string(before, "journal")).equals(journalKey(Main.string(current, "journal")));
+                    boolean reopened = Set.of("已拒稿", "已撤稿").contains(Main.string(before, "status")) &&
+                        !Set.of("已拒稿", "已撤稿").contains(Main.string(current, "status"));
+                    if (journalChanged || reopened) checkDuplicateSubmission(paper, Main.string(current, "journal"), Main.string(current, "id"));
+                    autoEndDates(current);
+                    validateSubmissionDates(current, !Objects.equals(before.get("status"), current.get("status")) || input.containsKey("submittedAt"));
+                    PaperService.touch(current);
                 }
             }
         }
@@ -177,7 +186,7 @@ public final class BusinessService {
         result.put("writingOverdue", hasWriting(paper) && delivered.isEmpty() && !Main.string(paper, "writingDueAt").isEmpty() && Main.string(paper, "writingDueAt").compareTo(LocalDate.now().toString()) < 0 && !Set.of("已交稿", "已完成", "已取消").contains(status));
         for (String type : PaperService.TYPES) {
             long total = 0;
-            for (Object item : Json.array(paper.get("transactions"))) { Map<String, Object> tx = Json.object(item); if (Main.string(tx, "type").equals(type)) total += PaperService.number(tx.get("amountCents")); }
+            for (Object item : Json.array(paper.get("transactions"))) { Map<String, Object> tx = Json.object(item); if (Main.string(tx, "type").equals(type)) total += FinancialLedger.signed(tx); }
             result.put(type + "Cents", total);
         }
     }
@@ -204,9 +213,11 @@ public final class BusinessService {
             if (list.size() >= 200) throw new ApiException(400, "每篇论文最多保留 200 次投稿");
             Map<String, Object> sub = submissionFields(input, null, paper);
             checkDuplicateSubmission(paper, Main.string(sub, "journal"), "");
-            PublicationFees.updateWithSubmission(input,paper,!list.isEmpty()||PublicationFees.mode(paper).equals("pending"));
+            PublicationFees.initialize(paper);boolean first=list.isEmpty();
             sub.put("id", UUID.randomUUID().toString()); sub.put("version", 1); sub.put("createdAt", PaperService.now()); sub.put("updatedAt", PaperService.now());
             list.add(sub); paper.put("activeSubmissionId", sub.get("id")); syncCurrent(paper); PaperService.touch(paper);
+            PublicationFees.onSubmissionAdded(paper,sub,input,first);
+            FinancialLedger.audit(paper,"fee_update",Map.of("publicationAccountId",PublicationFees.current(paper).get("id")),FinancialLedger.actor(vault),"建立投稿费用："+PublicationFees.descriptionAccount(PublicationFees.current(paper)),"");
             addHistory(paper, sub, "新增投稿记录");
             return PaperService.publicPaper(paper, true, state);
         });
@@ -222,11 +233,11 @@ public final class BusinessService {
             boolean reopened = Set.of("已拒稿", "已撤稿").contains(Main.string(sub, "status")) &&
                 !Set.of("已拒稿", "已撤稿").contains(Main.string(next, "status"));
             if (journalChanged || reopened) checkDuplicateSubmission(paper, Main.string(next, "journal"), id);
-            if(Main.string(paper,"activeSubmissionId").equals(id)) {
-                if(PublicationFees.hasTerms(input))PaperService.checkVersion(paper,Map.of("version",input.getOrDefault("paperVersion",0)));
-                PublicationFees.updateWithSubmission(input,paper,journalChanged);
-            }else if(PublicationFees.hasTerms(input))throw new ApiException(400,"历史投稿不能修改当前版面费约定，请在当前投稿或论文收支中调整");
+            if(PublicationFees.hasTerms(input))PaperService.checkVersion(paper,Map.of("version",input.getOrDefault("paperVersion",0)));
+            if(journalChanged){Map<String,Object> account=PublicationFees.bySubmission(paper,id);if(account!=null&&PublicationFees.hasTransactions(paper,Main.string(account,"id")))throw new ApiException(409,"该投稿已有版面费流水，更换期刊请使用改投");}
             sub.putAll(next); PaperService.touch(sub);
+            PublicationFees.updateForSubmission(paper,id,input,journalChanged);
+            if(PublicationFees.hasTerms(input)||journalChanged)FinancialLedger.audit(paper,"fee_update",Map.of("publicationAccountId",PublicationFees.bySubmission(paper,id).get("id")),FinancialLedger.actor(vault),"更新投稿费用："+PublicationFees.descriptionAccount(PublicationFees.bySubmission(paper,id)),"");
             syncCurrent(paper); PaperService.touch(paper); addHistory(paper, sub, "更新投稿记录");
             return PaperService.publicPaper(paper, true, state);
         });
@@ -236,11 +247,11 @@ public final class BusinessService {
         return vault.mutate(state -> {
             ServiceTermination.requireActive(PaperService.find(state,paperId));
             Map<String, Object> paper = PaperService.find(state, paperId), sub = findSubmission(paper, id);
-            PaperService.checkVersion(sub, input); Json.array(paper.get("submissions")).remove(sub);
+            PaperService.checkVersion(sub, input);PublicationFees.beforeDeleteSubmission(paper,id);Json.array(paper.get("submissions")).remove(sub);
             if (Main.string(paper, "activeSubmissionId").equals(id)) {
                 List<Object> list = Json.array(paper.get("submissions"));
                 paper.put("activeSubmissionId", list.isEmpty() ? "" : Json.object(list.get(list.size() - 1)).get("id"));
-                PublicationFees.updateWithSubmission(Map.of(),paper,true);
+                PublicationFees.mirror(paper);
             }
             syncCurrent(paper); PaperService.touch(paper); addHistory(paper, sub, "删除投稿记录");
             return PaperService.publicPaper(paper, true, state);
@@ -285,7 +296,7 @@ public final class BusinessService {
         if (password.length() > 500 || (merged.containsKey("submissionPassword") && !(merged.get("submissionPassword") instanceof String))) throw new ApiException(400, "投稿密码格式不正确，最多 500 个字符");
         result.put("submissionPassword", password);
         String manuscript=PaperService.text(merged,"manuscriptId",36);
-        if(!manuscript.isEmpty())AttachmentService.find(paper,manuscript);
+        if(!manuscript.isEmpty()&&AttachmentService.receipt(AttachmentService.find(paper,manuscript)))throw new ApiException(400,"收支凭证不能作为投稿稿件");
         result.put("manuscriptId",manuscript);
         validateContactAndUrl(result); autoEndDates(result); validateSubmissionDates(result, true);
         return result;

@@ -17,6 +17,8 @@ public class LegacyFixture {
             for (Object item : Json.array(state.get("papers"))) {
                 Map<String, Object> old = Json.object(item);
                 old.remove("serviceType"); old.remove("contractDepositCents");
+                old.remove("publicationFees");old.remove("financialAudit");
+                for(Object tx:Json.array(old.get("transactions")))for(String key:List.of("actor","publicationAccountId","reversalOf","reversalReason","correctsTransactionId"))Json.object(tx).remove(key);
             }
             if (args.length > 1 && args[1].equals("2")) return null;
             state.put("schema", 1); state.remove("customers");

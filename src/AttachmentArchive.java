@@ -63,6 +63,7 @@ final class AttachmentArchive {
                     for(Object p:Json.array(state.get("papers")))for(Object s:Json.array(Json.object(p).get("submissions"))) {
                         Map<String,Object> sub=Json.object(s);String id=Main.string(sub,"manuscriptId");if(!id.isEmpty())sub.put("manuscriptId",ids.get(id));
                     }
+                    for(Object p:Json.array(state.get("papers")))for(Object item:FinancialLedger.audits(Json.object(p))){Map<String,Object> event=Json.object(item);String id=Main.string(event,"fileId");if(!id.isEmpty())event.put("fileId",ids.get(id));}
                     store.restoreState(state);committed=true;
                 }
                 files.removeBlobs(previous);

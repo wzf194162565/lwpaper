@@ -167,6 +167,10 @@ public final class MysqlStore implements ApplicationStore {
             remapIds(paper,ids,"id","customerId","activeSubmissionId");
             for(Object sub:Json.array(paper.get("submissions")))remapIds(Json.object(sub),ids,"id");
             for(Object tx:Json.array(paper.get("transactions")))remapIds(Json.object(tx),ids,"id");
+            for(Object account:PublicationFees.accounts(paper))remapIds(Json.object(account),ids,"id","submissionId");
+            for(Object tx:Json.array(paper.get("transactions")))remapIds(Json.object(tx),ids,"reversalOf","correctsTransactionId","publicationAccountId");
+            for(Object event:FinancialLedger.audits(paper))remapIds(Json.object(event),ids,"id","transactionId","reversalOf","correctsTransactionId","publicationAccountId");
+            for(Object file:AttachmentService.files(paper))remapIds(Json.object(file),ids,"transactionId");
             for(Object event:Json.array(paper.get("history")))remapIds(Json.object(event),ids,"id","submissionId");
         }
     }
@@ -241,6 +245,7 @@ public final class MysqlStore implements ApplicationStore {
                 migrateCustomerClassification(c);
                 migrateServiceTermination(c);
                 migratePublicationFees(c);
+                migrateFinancialAudit(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -359,6 +364,20 @@ public final class MysqlStore implements ApplicationStore {
         }
         try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(9,?,?,UTC_TIMESTAMP(6))","版面费承担方式及利润核算",checksum);
+    }
+    private void migrateFinancialAudit(Connection c)throws Exception{
+        String script=Files.readString(config.root.resolve("db/mysql/V010__submission_costs_and_financial_audit.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=10");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V010 数据库迁移脚本校验不一致");return;}
+        try(Statement statement=c.createStatement()){
+            for(String sql:script.split(";"))if(!sql.isBlank())try{statement.execute(sql);}catch(SQLException e){
+                // MySQL DDL commits independently: resume safely after an interrupted upgrade.
+                if(!sql.stripLeading().startsWith("ALTER TABLE ")||!Set.of(1060,1061,1091).contains(e.getErrorCode()))throw e;
+            }
+        }
+        execute(c,"INSERT INTO lw_financial_audit(id,workspace_id,paper_id,action,actor,event_at,transaction_id,type,amount_cents,occurred_at,method,note,reason) SELECT UUID(),t.workspace_id,t.paper_id,'record',COALESCE(NULLIF(t.actor,''),'历史记录（操作人未知）'),t.created_at,t.id,t.type,t.amount_cents,t.occurred_at,t.method,t.note,'迁移前历史流水；操作人资料不可恢复' FROM lw_financial_transaction t WHERE NOT EXISTS(SELECT 1 FROM lw_financial_audit a WHERE a.workspace_id=t.workspace_id AND a.transaction_id=t.id AND a.action='record')");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(10,?,?,UTC_TIMESTAMP(6))","投稿版面费分账、收支冲销、凭证与操作留痕",checksum);
     }
     private void seedRoles(Connection c)throws SQLException{
         String[][] roles={{"administrator","空间管理员","当前本机账号，负责全部业务"},{"manager","业务主管","预留：业务管理及任务分配"},{"writer","写作人员","预留：分配给自己的写作任务"},{"submission","投稿专员","预留：分配给自己的投稿记录"},{"finance","财务人员","预留：收支与费用管理"},{"readonly","只读人员","预留：授权范围内的只读查看"}};
