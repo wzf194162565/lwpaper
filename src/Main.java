@@ -97,7 +97,7 @@ public class Main {
             }
             if (path.equals("/api/session") && method.equals("GET")) {
                 Session session = session(ex);
-                json(ex, 200, Map.of("initialized", accounts.initialized(), "authenticated", session != null, "username", session == null ? "" : session.store().username(), "csrf", session == null ? "" : session.csrf(), "storage", accounts.storageType(),"fileMaxBytes",AttachmentService.maxBytes(),"writerPaymentsSupported",true)); return;
+                json(ex, 200, Map.of("initialized", accounts.initialized(), "authenticated", session != null, "username", session == null ? "" : session.store().username(), "csrf", session == null ? "" : session.csrf(), "storage", accounts.storageType(),"fileMaxBytes",AttachmentService.maxBytes(),"writerPaymentsSupported",true,"terminationSupported",true,"publicationFeesSupported",true)); return;
             }
             if ((path.equals("/api/setup") || path.equals("/api/register") || path.equals("/api/login")) && method.equals("POST")) {
                 throttle(ex);
@@ -168,6 +168,12 @@ public class Main {
             if (path.startsWith("/api/papers/")) {
                 String[] parts = path.substring("/api/papers/".length()).split("/");
                 String id = parts[0];
+                if(parts.length==2&&parts[1].equals("publication-fee")&&method.equals("PUT")) {
+                    json(ex,200,papers.publicationFee(id,body(ex)));return;
+                }
+                if(parts.length==2&&parts[1].equals("termination")&&Set.of("POST","PUT").contains(method)) {
+                    json(ex,200,papers.terminate(id,body(ex),method.equals("PUT")));return;
+                }
                 if(parts.length==2&&parts[1].equals("files")&&method.equals("POST")) {
                     long version;
                     try{version=Long.parseLong(Objects.toString(ex.getRequestHeaders().getFirst("X-Paper-Version"),""));}catch(NumberFormatException e){throw new ApiException(400,"请提供论文版本号");}

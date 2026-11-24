@@ -199,10 +199,12 @@ public final class BusinessService {
     public Map<String, Object> addSubmission(String paperId, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String, Object> paper = PaperService.find(state, paperId); PaperService.checkVersion(paper, input);
+            ServiceTermination.requireActive(paper);
             List<Object> list = Json.array(paper.get("submissions"));
             if (list.size() >= 200) throw new ApiException(400, "每篇论文最多保留 200 次投稿");
             Map<String, Object> sub = submissionFields(input, null, paper);
             checkDuplicateSubmission(paper, Main.string(sub, "journal"), "");
+            PublicationFees.updateWithSubmission(input,paper,!list.isEmpty()||PublicationFees.mode(paper).equals("pending"));
             sub.put("id", UUID.randomUUID().toString()); sub.put("version", 1); sub.put("createdAt", PaperService.now()); sub.put("updatedAt", PaperService.now());
             list.add(sub); paper.put("activeSubmissionId", sub.get("id")); syncCurrent(paper); PaperService.touch(paper);
             addHistory(paper, sub, "新增投稿记录");
@@ -213,12 +215,17 @@ public final class BusinessService {
     public Map<String, Object> updateSubmission(String paperId, String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String, Object> paper = PaperService.find(state, paperId), sub = findSubmission(paper, id);
+            ServiceTermination.requireActive(paper);
             PaperService.checkVersion(sub, input);
             Map<String, Object> next = submissionFields(input, sub, paper);
             boolean journalChanged = !journalKey(Main.string(sub, "journal")).equals(journalKey(Main.string(next, "journal")));
             boolean reopened = Set.of("已拒稿", "已撤稿").contains(Main.string(sub, "status")) &&
                 !Set.of("已拒稿", "已撤稿").contains(Main.string(next, "status"));
             if (journalChanged || reopened) checkDuplicateSubmission(paper, Main.string(next, "journal"), id);
+            if(Main.string(paper,"activeSubmissionId").equals(id)) {
+                if(PublicationFees.hasTerms(input))PaperService.checkVersion(paper,Map.of("version",input.getOrDefault("paperVersion",0)));
+                PublicationFees.updateWithSubmission(input,paper,journalChanged);
+            }else if(PublicationFees.hasTerms(input))throw new ApiException(400,"历史投稿不能修改当前版面费约定，请在当前投稿或论文收支中调整");
             sub.putAll(next); PaperService.touch(sub);
             syncCurrent(paper); PaperService.touch(paper); addHistory(paper, sub, "更新投稿记录");
             return PaperService.publicPaper(paper, true, state);
@@ -227,11 +234,13 @@ public final class BusinessService {
 
     public Map<String, Object> deleteSubmission(String paperId, String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
+            ServiceTermination.requireActive(PaperService.find(state,paperId));
             Map<String, Object> paper = PaperService.find(state, paperId), sub = findSubmission(paper, id);
             PaperService.checkVersion(sub, input); Json.array(paper.get("submissions")).remove(sub);
             if (Main.string(paper, "activeSubmissionId").equals(id)) {
                 List<Object> list = Json.array(paper.get("submissions"));
                 paper.put("activeSubmissionId", list.isEmpty() ? "" : Json.object(list.get(list.size() - 1)).get("id"));
+                PublicationFees.updateWithSubmission(Map.of(),paper,true);
             }
             syncCurrent(paper); PaperService.touch(paper); addHistory(paper, sub, "删除投稿记录");
             return PaperService.publicPaper(paper, true, state);
@@ -372,17 +381,18 @@ public final class BusinessService {
         result.put("cooperationStartedAt", Main.string(customer, "cooperationStartedAt"));
         result.put("customerType", Main.string(customer, "customerType"));
         result.put("referrer", Main.string(customer, "referrer"));
-        long contract = 0, received = 0, unpaid = 0, cost = 0; int published = 0;
+        long contract = 0, received = 0, unpaid = 0, cost = 0,refund=0; int published = 0;
         for (Object item : Json.array(state.get("papers"))) {
             Map<String, Object> paper = Json.object(item);
             if (!Main.string(paper, "customerId").equals(Main.string(customer, "id"))) continue;
             Map<String, Object> view = PaperService.publicPaper(paper, false, state); papers.add(view);
-            contract += PaperService.number(view.get("contractCents")); received += PaperService.number(view.get("contractReceivedCents")); unpaid += PaperService.number(view.get("receivableCents")); cost += PaperService.number(view.get("writerFeeCents"));
+            contract += PaperService.number(view.get("settlementContractCents")); received += PaperService.number(view.get("contractReceivedCents")); unpaid += PaperService.number(view.get("receivableCents")); cost += PaperService.number(view.get("settlementWriterFeeCents"));refund+=PaperService.number(view.get("refundableCents"));
             if (Boolean.TRUE.equals(view.get("published"))) published++;
             for (Object journal : Json.array(view.get("publishedJournals"))) journals.add(journal.toString());
         }
         result.put("paperCount", papers.size()); result.put("publishedPaperCount", published); result.put("publishedJournals", new ArrayList<>(journals));
         result.put("contractCents", contract); result.put("receivedCents", received); result.put("receivableCents", unpaid); result.put("writerFeeCents", cost);
+        result.put("refundableCents",refund);
         result.putAll(AuthorRelations.summary(papers));
         if (detail) result.put("papers", papers); return result;
     }

@@ -8,7 +8,7 @@ import java.util.*;
 public final class PaperService {
     private final BusinessStore vault;
     static final Set<String> STATUSES = Set.of("草稿", "待投稿", "已投稿", "审稿中", "修改中", "已录用", "已发表", "已拒稿", "已撤稿");
-    static final Set<String> TYPES = Set.of("incoming_deposit", "incoming_balance", "incoming_other", "outgoing_deposit", "outgoing_balance", "outgoing_other");
+    static final Set<String> TYPES = Set.of("incoming_deposit", "incoming_balance", "incoming_other", "outgoing_deposit", "outgoing_balance", "outgoing_other", "incoming_settlement", "outgoing_refund", "outgoing_settlement", "incoming_writer_refund", "outgoing_publication", "incoming_publication_refund");
     private static final List<String> FIELDS = List.of("title", "authors", "customer", "writer", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "submittedAt", "followUpAt", "followUpReason", "status", "notes");
     public PaperService(BusinessStore vault) { this.vault = vault; }
 
@@ -51,11 +51,18 @@ public final class PaperService {
     public Map<String, Object> update(String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
+            ServiceTermination.requireActive(paper);
             Map<String, Object> nextFields = fields(input, paper);
             WriterPayments.validateTerms(paper, nextFields);
+            FinancialRules.validateCustomerTerms(paper,nextFields);
             validateFollowUp(nextFields, paper, input);
+            boolean journalChanged=!Main.string(paper,"journal").equals(Main.string(nextFields,"journal"));
+            if(journalChanged&&!PublicationFees.hasTerms(input)) {
+                nextFields.put("publicationFeeMode","pending");nextFields.put("publicationFeeCents",0L);
+            }
             boolean changed = List.of("status", "journal", "submissionSystem", "submissionUrl", "submittedAt").stream().anyMatch(k -> !Objects.equals(paper.get(k), nextFields.get(k)));
             boolean followUpChanged = !Main.string(paper,"followUpAt").equals(Main.string(nextFields,"followUpAt")) || !Main.string(paper,"followUpReason").equals(Main.string(nextFields,"followUpReason"));
+            PublicationFees.recordChange(paper,nextFields);
             paper.putAll(nextFields); touch(paper);
             BusinessService.updatePaper(state, paper, input);
             WriterPayments.apply(paper, input);
@@ -76,11 +83,31 @@ public final class PaperService {
         });
     }
 
+    public Map<String,Object> terminate(String id,Map<String,Object> input,boolean revision) throws Exception {
+        return vault.mutate(state -> {
+            Map<String,Object> paper=find(state,id);checkVersion(paper,input);
+            ServiceTermination.close(paper,input,revision);
+            return publicPaper(paper,true,state);
+        });
+    }
+
+    public Map<String,Object> publicationFee(String id,Map<String,Object> input) throws Exception {
+        return vault.mutate(state -> {
+            Map<String,Object> paper=find(state,id);checkVersion(paper,input);
+            Map<String,Object> next=new LinkedHashMap<>();PublicationFees.applyTerms(input,paper,next);
+            PublicationFees.recordChange(paper,next);paper.putAll(next);touch(paper);
+            return publicPaper(paper,true,state);
+        });
+    }
+
     public Map<String, Object> addTransaction(String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             List<Object> transactions = Json.array(paper.get("transactions"));
             Map<String, Object> tx = transaction(paper, input);
+            ServiceTermination.validateTransaction(paper,input,tx);
+            FinancialRules.validateTransaction(paper,tx);
+            PublicationFees.validateTransaction(paper,input,tx);
             if (input.containsKey("confirmWriterPayment") && !Boolean.TRUE.equals(input.get("confirmWriterPayment"))) throw new ApiException(400, "请确认本次金额已实际支付");
             if (Boolean.TRUE.equals(input.get("confirmWriterPayment"))) WriterPayments.validatePayment(paper, tx);
             transactions.add(tx); touch(paper); return publicPaper(paper, true, state);
@@ -108,6 +135,7 @@ public final class PaperService {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             boolean removed = Json.array(paper.get("transactions")).removeIf(item -> Main.string(Json.object(item), "id").equals(transactionId));
             if (!removed) throw new ApiException(404, "这笔收支已不存在");
+            ServiceTermination.validateLedger(paper);
             touch(paper); return publicPaper(paper, true, state);
         });
     }
@@ -137,6 +165,7 @@ public final class PaperService {
         result.put("contractDepositCents", contractDeposit);
         result.put("writerFeeCents", input.containsKey("writerFee") ? money(input, "writerFee") : previous == null ? 0L : number(previous.get("writerFeeCents")));
         BusinessService.applyWriting(input, values, result);
+        PublicationFees.applyTerms(input,previous==null?Map.of():previous,result);
         if (input.containsKey("submissionPassword")) {
             if (!(input.get("submissionPassword") instanceof String password) || password.length() > 500) throw new ApiException(400, "投稿密码最多 500 个字符");
             result.put("submissionPassword", input.get("submissionPassword"));
@@ -171,15 +200,19 @@ public final class PaperService {
         result.put("contractDepositCents", deposit); result.put("contractBalanceCents", contract - deposit);
         result.put("receivedCents", received); result.put("paidCents", paid);
         result.put("contractReceivedCents", contractReceived); result.put("writerPaidCents", writerPaid);
-        result.put("otherIncomeCents", received - contractReceived); result.put("otherExpenseCents", paid - writerPaid);
+        result.put("otherIncomeCents", ServiceTermination.total(paper,"incoming_other")); result.put("otherExpenseCents", ServiceTermination.total(paper,"outgoing_other"));
         result.put("receivableCents", Math.max(0, contract - contractReceived));
         result.put("payableCents", Math.max(0, writerFee - writerPaid));
         result.put("netCents", received - paid);
         BusinessService.enrichPaper(paper, result, state);
+        ServiceTermination.enrich(paper,result);
+        PublicationFees.enrich(paper,result);
         return result;
     }
 
     static void validateStored(Map<String, Object> paper) {
+        ServiceTermination.validateStored(paper);
+        PublicationFees.validateStored(paper);
         UUID.fromString(Main.string(paper, "id"));
         if (Main.string(paper, "code").isBlank() || number(paper.get("version")) < 1) throw new IllegalArgumentException();
         Instant.parse(Main.string(paper, "createdAt")); Instant.parse(Main.string(paper, "updatedAt"));
@@ -187,6 +220,7 @@ public final class PaperService {
         input.put("contractAmount", BigDecimal.valueOf(number(paper.get("contractCents")), 2).toPlainString());
         input.put("contractDepositAmount", BigDecimal.valueOf(number(paper.getOrDefault("contractDepositCents", 0)), 2).toPlainString());
         input.put("writerFee", BigDecimal.valueOf(number(paper.get("writerFeeCents")), 2).toPlainString());
+        input.put("publicationFeeAmount", BigDecimal.valueOf(PublicationFees.amount(paper),2).toPlainString());
         fields(input, null);
         List<Object> transactions = Json.array(paper.get("transactions"));
         if (transactions.size() > 1000) throw new IllegalArgumentException();

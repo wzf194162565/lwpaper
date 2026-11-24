@@ -28,7 +28,9 @@ final class MysqlStateMapper {
     static final Table HISTORY = table("lw_paper_history", "id",s("id","id"),s("paper_id","paperId"),s("submission_ref","submissionId"),s("action","action"),s("status","status"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),d("submitted_at","submittedAt"),n("sort_order","sortOrder"),t("event_at","at"));
     static final Table CURRENT = table("lw_paper_current_submission", "paper_id",s("paper_id","paperId"),s("submission_id","submissionId"));
     static final Table FILES = table("lw_paper_file","id",s("id","id"),s("paper_id","paperId"),s("filename","filename"),n("size_bytes","size"),s("sha256","sha256"),n("revision","revision"),s("note","note"),t("uploaded_at","uploadedAt"));
-    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,TRANSACTIONS,HISTORY,CURRENT);
+    static final Table TERMINATIONS=table("lw_paper_service_termination","paper_id",s("paper_id","paperId"),d("terminated_at","terminatedAt"),s("reason","reason"),n("customer_cents","customerCents"),n("writer_cents","writerCents"),t("updated_at","updatedAt"));
+    static final Table PUBLICATION_FEES=table("lw_paper_publication_fee","paper_id",s("paper_id","paperId"),s("mode","publicationFeeMode"),n("amount_cents","publicationFeeCents"),t("updated_at","updatedAt"));
+    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,TRANSACTIONS,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES);
 
     MysqlStateMapper(String workspace, DatabaseCrypto crypto) throws Exception { this.workspace=workspace;this.crypto=crypto;fingerprint=crypto.fingerprint(); }
 
@@ -71,6 +73,13 @@ final class MysqlStateMapper {
         }
         for(Map<String,Object> current:readTable(connection,CURRENT,"paper_id"))required(byPaper,Main.string(current,"paperId")).put("activeSubmissionId",current.get("submissionId"));
         for(Object item:papers)BusinessService.syncCurrent(Json.object(item));
+        for(Map<String,Object> closure:readTable(connection,TERMINATIONS,"paper_id")) {
+            String id=Main.string(closure,"paperId");closure.remove("paperId");required(byPaper,id).put("termination",closure);
+        }
+        for(Map<String,Object> fee:readTable(connection,PUBLICATION_FEES,"paper_id")) {
+            Map<String,Object> paper=required(byPaper,Main.string(fee,"paperId"));
+            paper.put("publicationFeeMode",fee.get("publicationFeeMode"));paper.put("publicationFeeCents",fee.get("publicationFeeCents"));
+        }
         return state;
     }
 
@@ -147,6 +156,8 @@ final class MysqlStateMapper {
         for(Object item:Json.array(state.get("papers"))) {
             Map<String,Object> paper=new LinkedHashMap<>(Json.object(item));paper.put("serviceType",BusinessService.serviceType(paper));
             String id=Main.string(paper,"id");add(result,PAPERS,paper);
+            if(paper.containsKey("publicationFeeMode")) { Map<String,Object> fee=new LinkedHashMap<>(paper);fee.put("paperId",id);add(result,PUBLICATION_FEES,fee); }
+            if(ServiceTermination.ended(paper)) { Map<String,Object> closure=new LinkedHashMap<>(Json.object(paper.get("termination")));closure.put("paperId",id);add(result,TERMINATIONS,closure); }
             for(Object file:AttachmentService.files(paper)) { Map<String,Object> f=new LinkedHashMap<>(Json.object(file));f.put("paperId",id);add(result,FILES,f); }
             if(BusinessService.hasWriting(paper)) { Map<String,Object> writing=new LinkedHashMap<>(paper);writing.put("paperId",id);add(result,WRITING,writing); }
             int position=0;

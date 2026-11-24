@@ -239,6 +239,8 @@ public final class MysqlStore implements ApplicationStore {
                 migratePaperFiles(c);
                 migrateFollowUpReason(c);
                 migrateCustomerClassification(c);
+                migrateServiceTermination(c);
+                migratePublicationFees(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -335,6 +337,28 @@ public final class MysqlStore implements ApplicationStore {
             }else if(!column.equals(formats[i]))throw new IllegalStateException("客户分类字段格式不兼容："+columns[i]);
         }
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(7,?,?,UTC_TIMESTAMP(6))","客户类型与介绍人",checksum);
+    }
+    private void migrateServiceTermination(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V008__service_termination.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=8");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V008 数据库迁移脚本校验不一致");
+            return;
+        }
+        try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(8,?,?,UTC_TIMESTAMP(6))","论文服务终止及独立结算",checksum);
+    }
+    private void migratePublicationFees(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V009__publication_fees.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=9");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V009 数据库迁移脚本校验不一致");
+            return;
+        }
+        try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(9,?,?,UTC_TIMESTAMP(6))","版面费承担方式及利润核算",checksum);
     }
     private void seedRoles(Connection c)throws SQLException{
         String[][] roles={{"administrator","空间管理员","当前本机账号，负责全部业务"},{"manager","业务主管","预留：业务管理及任务分配"},{"writer","写作人员","预留：分配给自己的写作任务"},{"submission","投稿专员","预留：分配给自己的投稿记录"},{"finance","财务人员","预留：收支与费用管理"},{"readonly","只读人员","预留：授权范围内的只读查看"}};

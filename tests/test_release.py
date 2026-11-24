@@ -69,8 +69,9 @@ class ReleaseTest(unittest.TestCase):
             self.assertIn('Class-Path: lib/mysql-connector-j-', manifest)
             self.assertFalse(any('Fixture' in name or 'Test' in name for name in jar.namelist()))
             self.assertIn('AccountRegistry.class', jar.namelist())
+            self.assertIn('ServiceTermination.class', jar.namelist())
         for name in ('db/mysql/V001__initial_schema.sql', 'db/mysql/V002__customer_cooperation_date.sql',
-                     'web/files.js', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'deploy/backup.sh',
+                     'web/files.js', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'db/mysql/V008__service_termination.sql', 'db/mysql/V009__publication_fees.sql', 'deploy/backup.sh',
                      'db/mysql/V003__paper_service_type.sql', 'db/mysql/V004__customer_payment_deposit.sql', 'deploy/nginx.conf.example', 'deploy/paper-desk.service',
                      'tools/backup_mysql.py', 'deploy/mysql-init.sql.example', 'deploy/backup.cron.example',
                      'config/mysql-client.example.cnf'):

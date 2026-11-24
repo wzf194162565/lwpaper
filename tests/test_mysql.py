@@ -24,6 +24,9 @@ import test_follow_up
 import test_authors
 import test_writer_payments
 import test_customer_types
+import test_termination
+import test_financial_rules
+import test_publication_fees
 
 
 def free_port():
@@ -34,6 +37,69 @@ def free_port():
 
 @unittest.skipUnless(os.environ.get('RUN_MYSQL_TESTS') == '1', 'Set RUN_MYSQL_TESTS=1 for isolated MySQL tests')
 class MysqlTest(ApiTestCase):
+    test_publication_resubmission = test_publication_fees.PublicationFeesTest.test_resubmission_reconfirms_fees_preserves_payments_and_updates_profit
+    publication_paper = test_publication_fees.PublicationFeesTest.publication_paper
+    publication_tx = test_publication_fees.PublicationFeesTest.publication_tx
+    publication_terms = test_publication_fees.PublicationFeesTest.publication_terms
+    test_publication_profit = test_publication_fees.PublicationFeesTest.test_included_fee_is_cost_once_and_cash_is_not_profit_until_settled
+    test_publication_author = test_publication_fees.PublicationFeesTest.test_author_free_and_pending_modes_never_create_our_page_fee_expense
+    test_publication_validation = test_publication_fees.PublicationFeesTest.test_payment_confirmation_limits_edits_and_stale_versions_are_atomic
+    test_publication_termination = test_publication_fees.PublicationFeesTest.test_termination_requires_page_fee_settlement_and_unknown_fee_confirmation
+    test_publication_persistence = test_publication_fees.PublicationFeesTest.test_fees_and_ledger_survive_restore_restart_and_are_account_isolated
+
+    def test_publication_upgrade_and_cascade_preserve_existing_records(self):
+        self.setup_account();paper=self.create()
+        self.process.terminate();self.process.wait(timeout=10)
+        self.sql('DROP TABLE lw_paper_publication_fee')
+        self.sql('DELETE FROM lw_schema_version WHERE version=9')
+        for attempt in range(2):
+            self.reset_client();self.start_server()
+            self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
+            restored=self.call('GET','/api/papers/'+paper['id'])
+            self.assertEqual(paper['title'],restored['title'])
+            self.assertEqual('pending',restored['publicationFeeMode']);self.assertIsNone(restored['estimatedProfitCents'])
+            self.assertEqual('1',self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=9'))
+            if attempt==0:
+                self.process.terminate();self.process.wait(timeout=10)
+                self.sql('DELETE FROM lw_schema_version WHERE version=9')
+        restored=self.publication_terms(restored,publicationFeeMode='included',publicationFeeAmount='100')
+        restored=self.publication_tx(restored,'outgoing_publication','100')
+        self.call('DELETE','/api/papers/'+restored['id'],{'version':restored['version']})
+        self.assertEqual('0',self.sql('SELECT COUNT(*) FROM lw_paper_publication_fee'))
+        self.assertEqual('0',self.sql('SELECT COUNT(*) FROM lw_financial_transaction'))
+        self.assertEqual([],self.call('GET','/api/papers'))
+
+    finance_paper = test_financial_rules.FinancialRulesTest.finance_paper
+    finance_tx = test_financial_rules.FinancialRulesTest.finance_tx
+    test_financial_amount_limits = test_financial_rules.FinancialRulesTest.test_receipts_and_direct_writer_payments_cannot_exceed_remaining_agreement
+    test_financial_cent_limits = test_financial_rules.FinancialRulesTest.test_zero_unspecified_installments_still_cap_totals_and_cents
+    test_financial_term_changes = test_financial_rules.FinancialRulesTest.test_contract_changes_cannot_hide_recorded_receipts_and_failed_edits_are_atomic
+    test_financial_concurrent_receipts = test_financial_rules.FinancialRulesTest.test_concurrent_or_retried_receipts_record_only_one_payment
+    test_financial_legacy_compatibility = test_financial_rules.FinancialRulesTest.test_deleting_receipt_reopens_balance_and_legacy_overpayments_remain_readable
+    termination_paper = test_termination.TerminationTest.termination_paper
+    termination_tx = test_termination.TerminationTest.termination_tx
+    termination_input = test_termination.TerminationTest.termination_input
+    test_termination_ledger = test_termination.TerminationTest.test_termination_keeps_editorial_history_and_settles_refund_and_writer_recovery
+    test_termination_validation = test_termination.TerminationTest.test_termination_rejects_duplicate_stale_invalid_and_normal_workflow_changes
+    test_termination_persistence = test_termination.TerminationTest.test_termination_adjustments_and_cash_validation_backup_restart_isolation
+    test_termination_half = test_termination.TerminationTest.test_half_termination_needs_no_writer_and_never_changes_original_contract
+
+    def test_termination_schema_upgrade_and_repeat_start_preserve_existing_papers(self):
+        self.setup_account()
+        paper = self.create()
+        self.process.terminate(); self.process.wait(timeout=10)
+        self.sql('DROP TABLE lw_paper_service_termination')
+        self.sql('DELETE FROM lw_schema_version WHERE version=8')
+        for attempt in range(2):
+            self.reset_client(); self.start_server()
+            self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+            restored = self.call('GET', '/api/papers/' + paper['id'])
+            self.assertEqual(paper['title'], restored['title'])
+            self.assertEqual('active', restored['serviceStatus'])
+            self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=8'))
+            if attempt == 0:
+                self.process.terminate(); self.process.wait(timeout=10)
+                self.sql('DELETE FROM lw_schema_version WHERE version=8')
     test_customer_types_validation = test_customer_types.CustomerTypeTest.test_customer_types_roundtrip_updates_and_validation
     test_customer_types_backup = test_customer_types.CustomerTypeTest.test_customer_types_backup_restore_and_restart
     test_customer_types_legacy = test_customer_types.CustomerTypeTest.test_customer_types_legacy_backup_remains_unclassified

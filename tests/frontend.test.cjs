@@ -162,7 +162,7 @@ test('balance sources use contract payments, show half service and overpayments,
  assert.equal(run('filteredFinancePapers().length'),1);
  assert.ok(!nodes.get('#results').innerHTML.includes('LW-2026-1'));
  // Global summary cards still include all papers while the table/export use the search.
- assert.match(nodes.get('#content').innerHTML,/¥13,500.05/);
+ assert.match(nodes.get('#content').innerHTML,/¥6,000.03/);
  run('download=(name,blob)=>{globalThis.exported={name,blob};};exportFinance()');
  const exported=run('globalThis.exported'),csv=await exported.blob.text();
  assert.match(exported.name,/^应收应付-/);
@@ -1058,6 +1058,166 @@ test('home exposes login, registration and password change without confusing reg
  assert.equal(run('state.view'),'settings');assert.match(nodes.get('#content').innerHTML,/id="password-form"/);
 });
 
+test('home forms omit required badges and include a separate visibility control for each password',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));
+ for(const [mode,names] of [['login',['password']],['register',['password','confirm']],['password',['currentPassword','newPassword','confirm']]]){
+  run(`state.authMode=${JSON.stringify(mode)};renderAuth()`);
+  const html=nodes.get('#root').innerHTML;
+  assert.ok(!html.includes('required-mark'));assert.ok(!html.includes('form-guide'));assert.ok(!html.includes('标记项必须填写'));
+  assert.match(html,/name="username"[^>]*required/);
+  const toggles=[...html.matchAll(/<button\b([^>]*data-action="toggle-auth-password"[^>]*)>/g)].map(m=>m[1]);
+  assert.equal(toggles.length,names.length);
+  for(const name of names){
+   assert.match(html,new RegExp(`id="auth-${name}" name="${name}" type="password" required`));
+   const attributes=toggles.find(value=>value.includes(`data-target="auth-${name}"`));
+   assert.ok(attributes);assert.match(attributes,/type="button"/);assert.match(attributes,/aria-pressed="false"/);
+   assert.ok(attributes.includes(`aria-controls="auth-${name}"`));
+  }
+ }
+});
+
+test('terminated papers keep their editorial status but leave writing and follow-up work and expose settlement totals',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,2);Object.assign(state.papers[0],{serviceStatus:'terminated',status:'审稿中',writingStatus:'写作中',writingOverdue:true,
+  termination:{terminatedAt:today(),reason:'客户爽约 <script>bad()</script>',customerCents:60000,writerCents:40000},
+  settlementContractCents:60000,settlementWriterFeeCents:40000,contractReceivedCents:100000,writerPaidCents:50000,refundableCents:40000,recoverableCents:10000,receivableCents:0,payableCents:0,settlementComplete:false});
+  state.drawer={kind:'detail',paper:state.papers[0],tab:'finance'};renderDetail();`);
+ let html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/服务已终止/);assert.match(html,/待结算/);assert.match(html,/客户爽约 &lt;script&gt;bad\(\)&lt;\/script&gt;/);
+ assert.match(html,/data-action="settlement-payment"[^>]*data-type="outgoing_refund"/);
+ assert.match(html,/data-type="incoming_writer_refund"/);assert.match(html,/待退 ¥400.00/);
+ assert.ok(!html.includes('data-action="edit-paper"'));assert.ok(!html.includes('登记已付定金'));
+ assert.equal(run('state.papers[0].status'),'审稿中');assert.equal(run('hasFollowUp(state.papers[0])'),false);
+ assert.equal(run('writingFinished(state.papers[0])'),true);
+ assert.equal(run('followUpPlans().length'),1);
+ run("state.tab='active'");assert.equal(run('filteredManagedPapers().length'),1);
+ run("state.tab='overdue'");assert.equal(run('filteredManagedPapers().length'),0);
+ run("state.tab='terminated'");assert.equal(run('filteredManagedPapers().length'),1);
+ run("state.view='papers';renderShell()");html=nodes.get('#results').innerHTML;
+ assert.match(html,/服务已终止/);assert.ok(!html.includes('data-action="resubmit-paper"'));assert.ok(!html.includes('data-action="edit-paper"'));
+ run("state.view='finance';state.financeType='balances';state.tab='all';renderShell()");
+ assert.match(nodes.get('#results').innerHTML,/待退款 ¥400.00/);assert.match(nodes.get('#results').innerHTML,/待追回 ¥100.00/);
+ run('syncCustomerSummaries()');assert.equal(run('state.customers[0].refundableCents'),40000);
+ run("state.drawer={kind:'detail',paper:state.papers[0],tab:'submissions'};renderDetail()");
+ html=nodes.get('#overlay-root').innerHTML;assert.ok(!html.includes('data-action="edit-submission"'));assert.ok(!html.includes('data-action="resubmit-paper"'));
+});
+
+test('termination form explicitly confirms independent settlement and failed requests retain the form',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.terminationSupported=true;state.drawer={kind:'detail',paper:state.papers[0],tab:'basic'};renderDetail();`);
+ assert.match(nodes.get('#overlay-root').innerHTML,/data-action="terminate-service"/);
+ await clickAction(handlers,{action:'terminate-service'});
+ let html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/id="termination-form"/);for(const name of ['terminatedAt','terminationReason','customerSettlement','writerSettlement','confirmTermination'])assert.ok(html.includes(`name="${name}"`));
+ assert.match(html,/原费用约定及实际流水保留/);assert.equal(run('isEditingDrawer()'),true);
+ const fixture=validationForm(run,'termination-form',[
+  {name:'terminatedAt',label:'终止日期',required:true,type:'date',value:run('today()')},
+  {name:'terminationReason',label:'终止原因',required:true,value:'客户爽约'},
+  {name:'customerSettlement',label:'客户最终结算',required:true,value:'600.00'},
+  {name:'writerSettlement',label:'写作者最终结算',required:true,value:'400.00'},
+  {name:'confirmTermination',label:'确认终止结算',required:true,type:'checkbox',checked:false,value:'yes'},
+ ]);
+ run("globalThis.terminationCalls=[];api=async(url,options)=>{terminationCalls.push({url,options});throw new Error('连接暂时不可用')}");
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('terminationCalls.length'),0);
+ fixture.controls.confirmTermination.checked=true;
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('terminationCalls.length'),1);assert.equal(run('state.drawer.kind'),'termination');assert.match(fixture.summary.textContent,/连接暂时不可用/);
+ assert.equal(fixture.submit.disabled,false);
+ run(`api=async(url,options)=>{terminationCalls.push({url,options});return {...state.papers[0],serviceStatus:'terminated',termination:{terminatedAt:today(),reason:'客户爽约',customerCents:60000,writerCents:40000},settlementContractCents:60000,settlementWriterFeeCents:40000,settlementComplete:false};}`);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('state.drawer.kind'),'detail');assert.equal(run('state.drawer.tab'),'finance');
+ const sent=JSON.parse(run('terminationCalls.at(-1).options.body'));
+ assert.equal(sent.confirmTermination,true);assert.equal(sent.customerSettlement,'600.00');assert.equal(sent.version,1);
+ assert.equal(run('terminationCalls.at(-1).options.method'),'POST');
+ await clickAction(handlers,{action:'terminate-service'});assert.match(nodes.get('#overlay-root').innerHTML,/调整终止结算/);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('terminationCalls.at(-1).options.method'),'PUT');
+});
+
+test('terminated service transactions expose refund and recovery types and export final amounts separately',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,1);Object.assign(state.papers[0],{serviceStatus:'terminated',
+  termination:{terminatedAt:today(),reason:'客户爽约',customerCents:60000,writerCents:40000},
+  settlementContractCents:60000,settlementWriterFeeCents:40000,refundableCents:40000,recoverableCents:10000});
+  state.drawer={kind:'detail',paper:state.papers[0],tab:'finance'};transactionForm('outgoing_refund');`);
+ let html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/value="outgoing_refund" selected/);assert.match(html,/name="amount" type="number" value="400.00"/);
+ assert.match(html,/name="confirmSettlementPayment"[^>]*required/);
+ assert.ok(!html.includes('value="incoming_deposit"'));assert.ok(!html.includes('value="outgoing_deposit"'));
+ assert.match(html,/value="incoming_writer_refund"/);assert.match(html,/value="outgoing_settlement"/);
+ run("download=(name,blob)=>{globalThis.closedExport={name,blob};};state.view='finance';state.financeType='balances';exportFinance()");
+ const csv=await run('closedExport.blob').text();
+ assert.match(csv,/客户最终结算（元）/);assert.match(csv,/待退款（元）/);assert.match(csv,/服务已终止/);assert.match(csv,/客户爽约/);
+});
+
+test('customer receipts reject excess amounts before posting and allow the remaining amount to be corrected',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`Object.assign(state.papers[0],{contractCents:300000,contractDepositCents:100000,contractReceivedCents:60000,
+  transactions:[{id:'receipt-1',type:'incoming_deposit',amountCents:60000}]});
+  state.drawer={kind:'transaction',paper:state.papers[0]};globalThis.receiptCalls=[];
+  api=async(url,options)=>{receiptCalls.push({url,data:JSON.parse(options.body)});return state.papers[0]};finishSave=async()=>{};`);
+ const fixture=validationForm(run,'transaction-form',[
+  {name:'type',label:'收支类型',tagName:'SELECT',required:true,value:'incoming_deposit'},
+  {name:'amount',label:'本次实际收付金额',required:true,type:'number',value:'400.01'},
+  {name:'date',label:'收付日期',required:true,type:'date',value:run('today()')},
+ ]);
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('receiptCalls.length'),0);assert.match(fixture.controls.amount.inlineError.textContent,/不能超过/);
+ assert.match(fixture.controls.amount.inlineError.textContent,/400.00/);
+ fixture.controls.amount.value='400.00';
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('receiptCalls.length'),1);assert.equal(run('receiptCalls[0].data.amount'),'400.00');
+ fixture.controls.type.value='incoming_balance';fixture.controls.amount.value='2000.01';
+ await Promise.all(handlers.get('submit').map(handler=>handler(fixture.event)));
+ assert.equal(run('receiptCalls.length'),1);
+ assert.equal(run("transactionRemaining(state.papers[0],'incoming_other')"),null);
+});
+
+test('home form preparation keeps validation and accessible requirements without adding required decorations',async()=>{
+ const {run}=app();await new Promise(resolve=>setImmediate(resolve));
+ const fixture=validationForm(run,'auth-form',[
+  {name:'username',label:'登录账号',required:true,value:''},
+  {name:'password',label:'管理密码',required:true,type:'password',value:''},
+ ],'login');
+ fixture.summary.classList={add(){}};
+ fixture.form.insertAdjacentHTML=function(position,html){this.guide=html;};
+ for(const control of fixture.controls)control.closest=()=>({querySelector:()=>null});
+ run('globalThis.preparedAuthRoot={querySelectorAll(){return [];}}');
+ run('preparedAuthRoot').querySelectorAll=()=>[fixture.form];
+ run('prepareForms(preparedAuthRoot)');
+ assert.equal(fixture.form.guide,undefined);
+ for(const control of fixture.controls){
+  assert.equal(control.required,true);assert.equal(control.attributes['aria-required'],'true');assert.equal(control.labels[0].mark,null);
+  assert.match(control.attributes['aria-describedby'],new RegExp(control.id+'-error'));
+ }
+ assert.equal(run('validateForm(preparedAuthRoot.querySelectorAll()[0])'),false);
+ assert.match(fixture.summary.textContent,/未提交/);
+});
+
+test('home password visibility toggles each field independently while preserving entered values',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run('globalThis.visibilityRequests=0;api=async()=>{visibilityRequests++;throw new Error("unexpected request")};');
+ const form={id:'auth-form'},controls=new Map();
+ for(const name of ['password','currentPassword','newPassword','confirm']){
+  const id='auth-'+name,input={type:'password',value:'Keep-entered-value-'+name,form,required:true,autocomplete:'new-password'};
+  controls.set(id,input);nodes.set('#'+id,input);
+ }
+ for(const [id,input] of controls){
+  const original=input.value,button={dataset:{action:'toggle-auth-password',target:id,label:'管理密码'},disabled:false,isConnected:true,
+   attributes:{},setAttribute(name,value){this.attributes[name]=value;},innerHTML:''};
+  const click=()=>Promise.all(handlers.get('click').map(handler=>handler({target:{closest:()=>button}})));
+  await click();
+  assert.equal(input.type,'text');assert.equal(input.value,original);assert.equal(input.required,true);
+  assert.equal(button.attributes['aria-pressed'],'true');assert.equal(button.attributes['aria-label'],'隐藏管理密码');
+  assert.equal(button.title,'隐藏管理密码');assert.equal(button.innerHTML,run("icon('eyeOff')"));
+  for(const [otherId,otherInput] of controls)if(otherId!==id)assert.equal(otherInput.type,'password');
+  await click();assert.equal(input.type,'password');assert.equal(input.value,original);
+  assert.equal(button.attributes['aria-pressed'],'false');assert.equal(button.attributes['aria-label'],'显示管理密码');
+  assert.equal(button.innerHTML,run("icon('eye')"));
+ }
+ assert.equal(run('visibilityRequests'),0);
+});
+
 test('home registration and login submit their own endpoint and enter the workspace',async()=>{
  for(const mode of ['login','register']) {
   const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
@@ -1913,4 +2073,244 @@ test('changing the current submission status updates overview outcomes and archi
  assert.equal(run('filteredPapers().length'),0);
  await clickAction(handlers,{action:'tab',tab:'active'});assert.equal(run('filteredPapers().length'),1);
  await clickAction(handlers,{action:'tab',tab:'published'});assert.equal(run('filteredPapers().length'),0);
+});
+
+
+test('publication terms exclude author-paid amounts and require a positive included cost',async()=>{
+ const {run,nodes,handlers}=app();seedBusiness(run);
+ run("state.drawer={kind:'detail',paper:state.papers[0]};publicationFeeEditor();globalThis.calls=[];api=async(url,options={})=>{calls.push({url,data:JSON.parse(options.body)});return {...state.papers[0],publicationFeeMode:'author',publicationFeeCents:0};};");
+ assert.match(nodes.get('#overlay-root').innerHTML,/作者自理版面费/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/不包含在报价中/);
+ const fixture=validationForm(run,'publication-fee-form',[
+  {name:'publicationFeeMode',label:'版面费承担方式',value:'author',tagName:'SELECT'},
+  {name:'publicationFeeAmount',label:'我方承担版面费',type:'number',value:'9999',min:'0.01'}
+ ]);
+ run('updateFormRequirements')(fixture.form);
+ assert.equal(fixture.controls.publicationFeeAmount.disabled,true);
+ fixture.controls.publicationFeeMode.value='included';fixture.controls.publicationFeeAmount.value='0';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),0);assert.equal(fixture.controls.publicationFeeAmount.required,true);
+ fixture.controls.publicationFeeMode.value='author';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);
+ assert.match(run('calls[0].url'),/publication-fee$/);
+ assert.equal(run('calls[0].data.publicationFeeMode'),'author');
+ assert.equal(run('calls[0].data.publicationFeeAmount'),undefined);
+});
+
+test('page fee payments and refunds require confirmation and respect remaining cost',async()=>{
+ const {run,nodes,handlers}=app();seedBusiness(run);
+ run(`Object.assign(state.papers[0],{publicationFeeMode:'included',publicationFeeCents:150000,publicationPaidCents:50000,publicationPayableCents:100000});
+  state.drawer={kind:'detail',paper:state.papers[0]};transactionForm('outgoing_publication');
+  globalThis.calls=[];api=async(url,options={})=>{calls.push({url,data:JSON.parse(options.body)});return state.papers[0];};finishSave=async()=>{};`);
+ assert.match(nodes.get('#overlay-root').innerHTML,/<option value="outgoing_publication" selected>/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="amount"[^>]*value="1000.00"/);
+ const fixture=validationForm(run,'transaction-form',[
+  {name:'type',label:'收支类型',value:'outgoing_publication',tagName:'SELECT'},
+  {name:'amount',label:'金额',type:'number',value:'1000'},
+  {name:'date',label:'支付日期',type:'date',value:'2026-01-02'},
+  {name:'confirmPublicationPayment',label:'确认实际付款',type:'checkbox',value:'yes',checked:false}
+ ]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),0);
+ fixture.controls.confirmPublicationPayment.checked=true;fixture.controls.amount.value='1000.01';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),0);
+ fixture.controls.amount.value='1000';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.equal(run('calls[0].data.confirmPublicationPayment'),true);
+ fixture.controls.type.value='incoming_publication_refund';fixture.controls.amount.value='500.01';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),1);
+ run("Object.assign(state.papers[0],{publicationFeeMode:'author',serviceStatus:'terminated'})");
+ assert.equal(run("transactionTypeAllowed(state.papers[0],'outgoing_publication')"),false);
+ assert.equal(run("transactionTypeAllowed(state.papers[0],'incoming_publication_refund')"),true);
+});
+
+test('profit details and exports distinguish unknown costs, expected profit and settled cash',()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ run(`Object.assign(state.papers[0],{publicationFeeMode:'included',publicationFeeCents:150000,publicationPaidCents:50000,publicationPayableCents:100000,
+  profitEstimateKnown:true,estimatedProfitCents:450000,profitSettled:false,settledProfitCents:null,netCents:250000});
+  state.drawer={kind:'detail',paper:state.papers[0],tab:'finance'};renderDetail();`);
+ let html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/预计利润/);assert.match(html,/已结清利润/);assert.match(html,/待结清/);assert.match(html,/现金净额/);
+ assert.match(html,/写作定金与尾款合计为总稿酬/);assert.match(html,/我方承担版面费/);
+ run("globalThis.csv=[];csvDownload=(name,rows)=>{csv=rows};paperCsvDownload('fee.csv',[['题目'],['论文']],state.papers.slice(0,1))");
+ const headers=Array.from(run('csv[0]')),row=run('csv[1]');
+ assert.equal(row[headers.indexOf('我方版面费成本（元）')],1500);
+ assert.equal(row[headers.indexOf('预计利润（元）')],4500);
+ assert.equal(row[headers.indexOf('已结清利润（元）')],'待结清');
+ run("Object.assign(state.papers[0],{publicationFeeMode:'pending',profitEstimateKnown:false,estimatedProfitCents:null});renderDetail()");
+ assert.match(nodes.get('#overlay-root').innerHTML,/待核算/);
+ run("state.view='finance';state.financeType='balances';renderShell()");
+ assert.match(nodes.get('#results').innerHTML,/版面费 \/ 预计利润/);
+});
+
+
+test('finance annual summaries separate transaction year cash flows from paper year profit and balances',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.view='finance';state.financeType='balances';state.papers=state.papers.slice(0,2);
+  Object.assign(state.papers[0],{createdAt:'2026-03-10T12:00:00Z',transactions:[
+   {id:'in-26',type:'incoming_deposit',amountCents:100000,date:'2026-03-12',createdAt:'2026-03-12T12:00:00Z',method:'转账',note:''},
+   {id:'other-in-26',type:'incoming_other',amountCents:5000,date:'2026-03-14',createdAt:'2026-03-14T12:00:00Z',method:'转账',note:''},
+   {id:'out-26',type:'outgoing_deposit',amountCents:20000,date:'2026-03-15',createdAt:'2026-03-15T12:00:00Z',method:'转账',note:''}] ,
+   receivableCents:300000,payableCents:40000,publicationPayableCents:25000,refundableCents:10000,recoverableCents:5000,
+   profitEstimateKnown:true,estimatedProfitCents:180000,profitSettled:true,settledProfitCents:120000});
+  Object.assign(state.papers[1],{createdAt:'2025-05-10T12:00:00Z',transactions:[
+   {id:'in-25-paid-26',type:'incoming_balance',amountCents:15000,date:'2026-04-01',createdAt:'2026-04-01T12:00:00Z',method:'转账',note:''},
+   {id:'out-25-26',type:'outgoing_other',amountCents:3000,date:'2026-04-02',createdAt:'2026-04-02T12:00:00Z',method:'转账',note:''}],
+   receivableCents:90000,payableCents:10000,publicationPayableCents:0,profitEstimateKnown:false,estimatedProfitCents:null,profitSettled:false,settledProfitCents:null});
+  state.financeYear='2026';renderFinance();`);
+ let html=nodes.get('#content').innerHTML;
+ assert.match(html,/2026 年收支汇总/);assert.match(html,/按年度查看收付款/);
+ assert.match(html,/累计收款[\s\S]*?¥1,200\.00/);
+ assert.match(html,/累计付款[\s\S]*?¥230\.00/);
+ assert.match(html,/净现金流[\s\S]*?¥970\.00/);
+ assert.match(html,/待收服务费[\s\S]*?¥3,000\.00/);
+ assert.match(html,/稿酬 ¥400\.00 · 版面费 ¥250\.00/);
+ assert.match(html,/¥1,800\.00/);assert.match(html,/净利润（已结清）[\s\S]*?¥1,200\.00/);
+ assert.match(html,/收付款按实际发生年份统计/);
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-year',value:'2025'}})));
+ html=nodes.get('#content').innerHTML;
+ assert.equal(run('state.financeYear'),'2025');
+ assert.match(html,/2025 年收支汇总/);
+ assert.match(html,/部分待核算/);assert.match(html,/1 篇版面费待确认/);
+ assert.match(html,/累计收款[\s\S]*?¥0\.00/);
+ assert.match(html,/待收服务费[\s\S]*?¥900\.00/);
+ assert.match(html,/value="all" >全部年份/);
+});
+
+
+test('year selection scopes source lists and exports while resets preserve the selected year',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.view='finance';state.financeYear='2026';state.papers=state.papers.slice(0,3);
+  state.papers.forEach((p,i)=>{p.createdAt=(i===0?'2025':i===1?'2026':'2027')+'-06-01T12:00:00Z';p.transactions=p.transactions.map(t=>({...t,date:i===2?'2027-01-01':'2026-02-01'}));});
+  state.search='no-match';state.from='2028-01-01';state.to='2028-02-01';renderFinance();`);
+ await clickAction(handlers,{action:'finance-source',type:'incoming'});
+ assert.equal(run('state.financeYear'),'2026');
+ assert.deepEqual(Array.from(run('filteredTransactions().map(t=>t.paper.id)')),['paper-0','paper-1']);
+ assert.ok(!nodes.get('#results').innerHTML.includes('paper-2'));
+ run("download=(name,blob)=>{globalThis.yearExport={name,blob};};exportFinance()");
+ let csv=await run('yearExport.blob').text();assert.ok(csv.includes('LW-2026-0'));assert.ok(csv.includes('LW-2026-1'));assert.ok(!csv.includes('LW-2026-2'));
+ await clickAction(handlers,{action:'finance-source',type:'balances'});
+ assert.deepEqual(Array.from(run('filteredFinancePapers().map(p=>p.id)')),['paper-1']);
+ run("exportFinance()");csv=await run('yearExport.blob').text();assert.ok(csv.includes('LW-2026-1'));assert.ok(!csv.includes('LW-2026-0'));
+ await clickAction(handlers,{action:'clear-filters'});assert.equal(run('state.financeYear'),'2026');
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-year',value:'all'}})));
+ assert.equal(run('filteredFinancePapers().length'),3);
+ run("exportFinanceYear()");csv=await run('yearExport.blob').text();
+ assert.match(csv,/累计收款/);assert.match(csv,/净利润（已结清）/);assert.match(csv,/待退回版面费/);assert.match(csv,/全部年份/);
+ for(const secret of ['private-account','private@example.com','13800000000'])assert.ok(!csv.includes(secret));
+});
+
+test('annual profit attribution handles cross-year settlement, refunds and negative profit without double counting',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.view='finance';state.financeYear='2026';state.papers=state.papers.slice(0,3);
+  Object.assign(state.papers[0],{createdAt:'2025-04-01T12:00:00Z',profitEstimateKnown:true,profitSettled:true,settledProfitCents:150000,estimatedProfitCents:150000,
+   contractCents:300000,writerFeeCents:100000,publicationFeeMode:'included',publicationFeeCents:50000,
+   transactions:[{id:'old-deposit',type:'incoming_deposit',amountCents:100000,date:'2025-04-01',createdAt:'2025-04-01T12:00:00Z',note:'',method:''},
+    {id:'tail',type:'incoming_balance',amountCents:200000,date:'2026-01-01',createdAt:'2026-01-01T12:00:00Z',note:'',method:''}]});
+  Object.assign(state.papers[1],{createdAt:'2026-05-01T12:00:00Z',profitEstimateKnown:true,profitSettled:false,settledProfitCents:null,estimatedProfitCents:50000,
+   transactions:[{id:'pending',type:'incoming_deposit',amountCents:50000,date:'2026-05-01',createdAt:'2026-05-01T12:00:00Z',note:'',method:''}]});
+  Object.assign(state.papers[2],{createdAt:'2026-05-01T12:00:00Z',profitEstimateKnown:true,profitSettled:true,settledProfitCents:-20000,estimatedProfitCents:-20000,
+   serviceStatus:'terminated',termination:{terminatedAt:'2026-08-01'},
+   transactions:[{id:'refund',type:'outgoing_refund',amountCents:80000,date:'2026-08-10',createdAt:'2026-08-10T12:00:00Z',note:'',method:''},
+    {id:'fee-return',type:'incoming_publication_refund',amountCents:20000,date:'2026-08-11',createdAt:'2026-08-11T12:00:00Z',note:'',method:''}]});
+  renderFinance();`);
+ assert.equal(run('financeYearSummary().settledProfit'),130000);
+ assert.equal(run('financeYearSummary().paid'),80000);
+ assert.equal(run('financeYearSummary().received'),270000);
+ assert.equal(run('financeYearSummary().profit'),30000);
+ assert.equal(run('financeSettlementDate(state.papers[2])'),'2026-08-11');
+ await clickAction(handlers,{action:'finance-source',type:'profits'});
+ assert.deepEqual(Array.from(run('filteredFinancePapers().map(p=>p.id)')),['paper-0','paper-2']);
+ assert.match(nodes.get('#results').innerHTML,/净利润 ¥1,300\.00/);assert.match(nodes.get('#results').innerHTML,/2026\.08\.11/);
+ run("download=(name,blob)=>{globalThis.profitExport={name,blob};};exportFinance()");
+ let csv=await run('profitExport.blob').text();assert.match(csv,/1500/);assert.match(csv,/-200/);assert.ok(!csv.includes('LW-2026-1'));
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-profit-basis',value:'created'}})));
+ assert.equal(run('financeYearSummary().settledProfit'),-20000);
+ assert.deepEqual(Array.from(run('filteredFinancePapers().map(p=>p.id)')),['paper-2']);
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-year',value:'2025'}})));
+ assert.equal(run('financeYearSummary().settledProfit'),150000);
+ run("state.financeProfitBasis='settled';Object.assign(state.papers[0],{profitSettled:false,settledProfitCents:null})");
+ assert.equal(run('financeYearSummary().settledProfit'),0);
+});
+
+
+test('annual cash sums respect calendar boundaries and cents including refunds, with empty years reported as zero',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.view='finance';state.financeYear='2026';state.papers=state.papers.slice(0,1);
+  Object.assign(state.papers[0],{createdAt:'2024-06-01T12:00:00Z',transactions:[
+   {type:'incoming_deposit',amountCents:99999,date:'2025-12-31'},
+   {type:'incoming_balance',amountCents:10,date:'2026-01-01'},
+   {type:'incoming_publication_refund',amountCents:20,date:'2026-12-31'},
+   {type:'outgoing_refund',amountCents:4,date:'2026-01-01'},
+   {type:'outgoing_other',amountCents:16,date:'2026-12-31'},
+   {type:'outgoing_balance',amountCents:99999,date:'2027-01-01'}].map((tx,i)=>({...tx,id:'boundary-'+i,createdAt:tx.date+'T12:00:00Z',method:'',note:''}))});`);
+ assert.equal(run('financeYearSummary().received'),30);
+ assert.equal(run('financeYearSummary().paid'),20);
+ assert.equal(run('financeYearSummary().cashNet'),10);
+ assert.equal(run('financeYearSummary().papers.length'),0);
+ assert.deepEqual(Array.from(run('financeYearOptions()')),['2027','2026','2025','2024']);
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-year',value:'2023'}})));
+ assert.equal(run('financeYearSummary().received'),0);assert.equal(run('financeYearSummary().settledProfit'),0);
+ assert.equal(run('financeYearSummary().unknownCount'),0);
+ assert.match(nodes.get('#results').innerHTML,/没有找到符合条件/);
+ run("state.papers=[];state.financeYear='all';renderFinance()");
+ assert.match(nodes.get('#content').innerHTML,/全部年份收支汇总/);
+ assert.equal(run('financeYearSummary().cashNet'),0);
+});
+
+
+test('publication fee pending mode stays available and resubmission requests fresh terms',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("openPaperEditor(null,'half')");
+ let html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/<option value="pending" selected>/);
+ run(`Object.assign(state.papers[0],{publicationFeeMode:'included',publicationFeeCents:150000});
+   openSubmissionEditor(state.papers[0],null,{resubmit:true,source:state.papers[0].submissions[0]});`);
+ html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/原版面费约定：我方承担版面费/);assert.match(html,/请按新期刊重新选择/);
+ assert.match(html,/<option value="pending" selected>/);
+ const fixture=validationForm(run,'submission-form',[
+  {name:'journal',label:'期刊',value:'新期刊'},
+  {name:'publicationFeeMode',label:'版面费承担方式',value:'',tagName:'SELECT',required:true},
+  {name:'publicationFeeAmount',label:'我方承担版面费',value:'0',type:'number'}
+ ]);
+ assert.equal(run('validateForm')(fixture.form),false);
+ fixture.controls.publicationFeeMode.value='pending';
+ assert.equal(run('validateForm')(fixture.form),true);
+ fixture.controls.publicationFeeMode.value='included';fixture.controls.publicationFeeAmount.value='0';
+ assert.equal(run('validateForm')(fixture.form),false);
+ fixture.controls.publicationFeeAmount.value='1200';
+ assert.equal(run('validateForm')(fixture.form),true);
+ assert.equal(fixture.controls.publicationFeeAmount.required,true);
+ fixture.controls.publicationFeeMode.value='author';
+ assert.equal(run('validateForm')(fixture.form),true);
+ assert.equal(fixture.controls.publicationFeeAmount.disabled,true);
+});
+
+
+test('resubmission saves the new journal and fee terms in one request, and active edits include the paper version',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,1);Object.assign(state.papers[0],{activeSubmissionId:state.papers[0].submissions[0].id,publicationFeeMode:'included',publicationFeeCents:80000,version:12});
+  globalThis.feeCalls=[];api=async(url,options={})=>{if(options.method)feeCalls.push({url,data:JSON.parse(options.body)});return state.papers[0];};finishSave=async()=>{};
+  openSubmissionEditor(state.papers[0],null,{resubmit:true,source:state.papers[0].submissions[0]});`);
+ let fixture=validationForm(run,'submission-form',[
+  {name:'journal',label:'投稿期刊',required:true,value:'新期刊'},
+  {name:'publicationFeeMode',label:'版面费承担方式',tagName:'SELECT',required:true,value:'included'},
+  {name:'publicationFeeAmount',label:'我方承担金额',type:'number',value:'1200'}
+ ]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('feeCalls.length'),1);assert.equal(run('feeCalls[0].data.journal'),'新期刊');
+ assert.equal(run('feeCalls[0].data.publicationFeeAmount'),'1200');assert.equal(run('feeCalls[0].data.version'),12);
+ assert.equal(run('feeCalls[0].url'),'/api/papers/paper-0/submissions');
+ run("openSubmissionEditor(state.papers[0],state.papers[0].submissions[0],{mode:'edit'})");
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="publicationFeeMode"/);
+ fixture=validationForm(run,'submission-form',[
+  {name:'journal',label:'投稿期刊',required:true,value:'重新确认期刊'},
+  {name:'publicationFeeMode',label:'版面费承担方式',tagName:'SELECT',required:true,value:'pending'},
+  {name:'publicationFeeAmount',label:'我方承担金额',type:'number',value:'0'}
+ ]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('feeCalls.length'),2);assert.equal(run('feeCalls[1].data.paperVersion'),12);
+ assert.equal(run('feeCalls[1].data.publicationFeeMode'),'pending');
+ assert.equal(run('feeCalls[1].data.publicationFeeAmount'),undefined);
 });
