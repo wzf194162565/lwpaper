@@ -19,6 +19,11 @@ import uuid
 from test_system import ApiTestCase, ROOT
 import test_system
 import test_business
+import test_files
+import test_follow_up
+import test_authors
+import test_writer_payments
+import test_customer_types
 
 
 def free_port():
@@ -29,6 +34,168 @@ def free_port():
 
 @unittest.skipUnless(os.environ.get('RUN_MYSQL_TESTS') == '1', 'Set RUN_MYSQL_TESTS=1 for isolated MySQL tests')
 class MysqlTest(ApiTestCase):
+    test_customer_types_validation = test_customer_types.CustomerTypeTest.test_customer_types_roundtrip_updates_and_validation
+    test_customer_types_backup = test_customer_types.CustomerTypeTest.test_customer_types_backup_restore_and_restart
+    test_customer_types_legacy = test_customer_types.CustomerTypeTest.test_customer_types_legacy_backup_remains_unclassified
+
+    def test_customer_types_schema_upgrade_preserves_customers_and_resumes_partial_ddl(self):
+        self.setup_account()
+        customer = self.call('POST', '/api/customers', {'name': '升级前客户', 'phone': '13800000000'}, expected=201)
+        paper = self.call('POST', '/api/papers', {
+            'title': '保留关联论文', 'serviceType': 'half', 'customerId': customer['id'], 'contractAmount': '500'}, expected=201)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('ALTER TABLE lw_customer DROP COLUMN referrer, DROP COLUMN customer_type')
+        self.sql('DELETE FROM lw_schema_version WHERE version=7')
+        for attempt in range(3):
+            self.reset_client()
+            self.start_server()
+            self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+            restored = self.call('GET', '/api/customers/' + customer['id'])
+            self.assertEqual(customer['name'], restored['name'])
+            self.assertEqual(customer['phone'], restored['phone'])
+            self.assertEqual(paper['id'], restored['papers'][0]['id'])
+            self.assertEqual(50000, restored['contractCents'])
+            self.assertEqual('' if attempt == 0 else '他人介绍', restored['customerType'])
+            self.assertEqual('', restored['referrer'])
+            self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=7'))
+            if attempt == 0:
+                self.call('PUT', '/api/customers/' + customer['id'], {
+                    'version': restored['version'], 'customerType': '他人介绍', 'referrer': '测试介绍人'})
+                self.process.terminate()
+                self.process.wait(timeout=10)
+                self.sql('ALTER TABLE lw_customer DROP COLUMN referrer')
+                self.sql('DELETE FROM lw_schema_version WHERE version=7')
+            elif attempt == 1:
+                self.process.terminate()
+                self.process.wait(timeout=10)
+
+    payment = staticmethod(test_writer_payments.WriterPaymentTest.payment)
+    paper = test_writer_payments.WriterPaymentTest.paper
+    test_writer_terms = test_writer_payments.WriterPaymentTest.test_terms_alone_do_not_pay_and_confirmed_deposit_and_balance_settle_once
+    test_writer_create_retry = test_writer_payments.WriterPaymentTest.test_create_with_payment_cannot_duplicate_paper_or_payment_on_retry
+    test_writer_atomic_failure = test_writer_payments.WriterPaymentTest.test_bad_payment_batch_rolls_back_terms_and_every_payment
+    test_writer_precision = test_writer_payments.WriterPaymentTest.test_partial_payments_precision_and_version_prevent_double_counting
+    test_writer_reduction = test_writer_payments.WriterPaymentTest.test_fee_reductions_cannot_erase_recorded_payments_and_half_has_no_payments
+    test_writer_ledger_restore = test_writer_payments.WriterPaymentTest.test_shortcut_payments_and_existing_ledger_share_calculation_after_restore
+    test_author_counts = test_authors.AuthorRelationsTest.test_account_and_customer_author_counts_deduplicate_by_name
+    test_author_coauthored_papers = test_authors.AuthorRelationsTest.test_coauthors_do_not_multiply_paper_publication_or_customer_fees
+    test_author_updates = test_authors.AuthorRelationsTest.test_author_updates_deletes_and_customer_moves_recompute_associations
+    test_author_isolation = test_authors.AuthorRelationsTest.test_authors_remain_isolated_between_login_accounts
+    test_author_backup = test_authors.AuthorRelationsTest.test_author_associations_survive_old_backups_and_restart_without_new_records
+    test_follow_up_roundtrip = test_follow_up.FollowUpTest.test_follow_up_context_roundtrip_updates_backup_and_restart
+    test_follow_up_validation = test_follow_up.FollowUpTest.test_new_plan_requires_context_and_failed_updates_are_atomic
+    test_follow_up_legacy = test_follow_up.FollowUpTest.test_legacy_backup_keeps_date_and_allows_context_to_be_added
+
+    def test_follow_up_schema_upgrade_preserves_old_dates_and_recovers_after_ddl(self):
+        self.setup_account()
+        paper = self.call('POST', '/api/papers', {
+            'title': '升级前跟进计划', 'followUpAt': '2030-01-12', 'followUpReason': '原事项'}, expected=201)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('ALTER TABLE lw_paper DROP COLUMN follow_up_reason')
+        self.sql('DELETE FROM lw_schema_version WHERE version=6')
+        for attempt in range(2):
+            self.reset_client()
+            self.start_server()
+            self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+            path = '/api/papers/' + paper['id']
+            old = self.call('GET', path)
+            self.assertEqual('2030-01-12', old['followUpAt'])
+            self.assertEqual('' if attempt == 0 else '联系客户确认修改意见', old['followUpReason'])
+            self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=6'))
+            if attempt == 0:
+                self.call('PUT', path, {'version': old['version'], 'followUpReason': '联系客户确认修改意见'})
+                self.process.terminate()
+                self.process.wait(timeout=10)
+                self.sql('DELETE FROM lw_schema_version WHERE version=6')
+    JAVA_OPTIONS = test_files.AttachmentTest.JAVA_OPTIONS
+    binary = test_files.AttachmentTest.binary
+    upload = test_files.AttachmentTest.upload
+    restore_archive = test_files.AttachmentTest.restore_archive
+    download_file = test_files.AttachmentTest.download_file
+    test_file_revisions = test_files.AttachmentTest.test_revisions_keep_originals_and_submission_binding_after_restart
+    test_file_validation = test_files.AttachmentTest.test_invalid_uploads_and_stale_edits_leave_no_files
+    test_file_backup_isolation = test_files.AttachmentTest.test_account_isolation_and_portable_backup_restores_independent_files
+    test_file_restore_atomicity = test_files.AttachmentTest.test_restore_is_atomic_for_damaged_missing_extra_and_duplicate_entries
+    test_file_password_change = test_files.AttachmentTest.test_password_change_and_legacy_restore_preserve_expected_files
+    test_file_retry = test_files.AttachmentTest.test_retrying_completed_upload_does_not_duplicate_versions
+
+    def test_file_schema_upgrade_is_repeatable_and_keeps_existing_papers(self):
+        self.setup_account()
+        paper = self.create()
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('DROP TABLE lw_paper_file')
+        self.sql('ALTER TABLE lw_submission DROP COLUMN manuscript_id')
+        self.sql('DELETE FROM lw_schema_version WHERE version=5')
+        for attempt in range(2):
+            self.reset_client()
+            self.start_server()
+            self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+            existing = self.call('GET', f"/api/papers/{paper['id']}")
+            self.assertEqual(paper['title'], existing['title'])
+            self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=5'))
+            if attempt == 0:
+                paper = self.upload(existing)
+                self.process.terminate()
+                self.process.wait(timeout=10)
+                self.sql('DELETE FROM lw_schema_version WHERE version=5')
+        self.assertEqual(test_files.PDF, self.download_file(paper))
+
+    def test_file_archive_can_cross_between_mysql_and_file_storage(self):
+        self.setup_account()
+        paper = self.upload(self.create())
+        archive = self.call('GET', '/api/backup', raw=True)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        ApiTestCase.start_server(self)
+        self.setup_account(username='file-account')
+        self.restore_archive(archive)
+        local = self.call('GET', '/api/papers')[0]
+        self.assertEqual(test_files.PDF, self.download_file(local))
+        archive = self.call('GET', '/api/backup', raw=True)
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        self.restore_archive(archive)
+        restored = self.call('GET', '/api/papers')[0]
+        self.assertEqual(test_files.PDF, self.download_file(restored))
+
+    def test_file_legacy_import_keeps_manuscripts_and_original_vault(self):
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        ApiTestCase.start_server(self)
+        self.setup_account()
+        paper = self.upload(self.create())
+        original = (self.data / 'papers.vault').read_bytes()
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        restored = self.call('GET', f"/api/papers/{paper['id']}")
+        self.assertEqual(paper['files'], restored['files'])
+        self.assertEqual(test_files.PDF, self.download_file(restored))
+        self.assertEqual(original, (self.data / 'papers.vault').read_bytes())
+
+    def test_file_whole_backup_refuses_a_running_application(self):
+        self.setup_account()
+        self.upload(self.create())
+        options = self.data / 'backup-client.cnf'
+        options.write_text('[client]\nhost=127.0.0.1\nport={}\nuser=root\n'.format(self.mysql_port), encoding='utf-8')
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/backup_mysql.py'), '--database', self.database,
+                                 '--defaults-file', str(options), '--key-file', str(self.data / 'database.key'),
+                                 '--output', str(self.data / 'snapshots'), '--mysqldump', str(self.bin / 'mysqldump.exe')],
+                                cwd=ROOT, capture_output=True, encoding='utf-8')
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('Stop Paper Desk', result.stderr)
+        self.assertFalse(list((self.data / 'snapshots').glob('*.tar.gz')))
+        self.assertTrue(self.call('GET', '/api/session')['authenticated'])
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -77,7 +244,7 @@ class MysqlTest(ApiTestCase):
         if not hasattr(self, 'databases'):
             self.databases = {}
         self.database = self.databases.setdefault(str(self.data), 'lw_test_' + uuid.uuid4().hex)
-        self.process = subprocess.Popen(['java', '-Dapp.storage=mysql', f'-Dapp.port={self.port}',
+        self.process = subprocess.Popen(['java', *self.JAVA_OPTIONS, '-Dapp.storage=mysql', f'-Dapp.port={self.port}',
                                          f'-Dapp.data={self.data}', f'-Ddb.name={self.database}',
                                          '-Ddb.host=127.0.0.1', f'-Ddb.port={self.mysql_port}',
                                          '-Ddb.username=root', '-Ddb.password=', '-Ddb.sslMode=DISABLED',
@@ -118,8 +285,13 @@ class MysqlTest(ApiTestCase):
     test_restart_backup_restore_and_password_change = test_system.SystemTest.test_encryption_restart_backup_restore_and_password_change
     test_static_routes_and_json_rejection = test_system.SystemTest.test_static_routes_and_json_rejection
     test_business_relationships = test_business.BusinessTest.test_customer_writing_submission_finance_relationships
+    test_delivery_status = test_business.BusinessTest.test_delivery_date_synchronizes_status_and_stops_overdue
+    test_legacy_delivery_status = test_business.BusinessTest.test_legacy_delivered_writing_records_are_consistent_in_every_view
     test_resubmission_journal_history_is_persistent_and_scoped_to_each_paper = test_business.BusinessTest.test_resubmission_journal_history_is_persistent_and_scoped_to_each_paper
     test_submission_validation_and_hidden_password = test_business.BusinessTest.test_submission_version_validation_and_preserve_hidden_password
+    test_submission_edit_identity = test_business.BusinessTest.test_submission_edits_keep_identity_count_and_current_pointer
+    test_duplicate_journal_guard = test_business.BusinessTest.test_duplicate_journal_creation_is_atomic_and_existing_edits_still_work
+    test_reopening_submission_guard = test_business.BusinessTest.test_reopening_an_old_attempt_cannot_duplicate_an_active_attempt
     test_writing_validation_and_customer_reassignment = test_business.BusinessTest.test_writing_validation_customer_identity_and_reassignment
     test_customer_cooperation_date_persistence_validation_and_backup = test_business.BusinessTest.test_customer_cooperation_date_persistence_validation_and_backup
     test_full_and_half_workflows = test_business.BusinessTest.test_full_and_half_service_types_persist_with_independent_workflows
@@ -235,13 +407,15 @@ class MysqlTest(ApiTestCase):
 
     def test_full_database_and_key_backup_restores_all_accounts(self):
         self.setup_account()
-        first = self.create(title='云端迁移的第一账号论文')
+        first = self.upload(self.create(title='云端迁移的第一账号论文'))
         self.reset_client()
         self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
-        second = self.create(title='云端迁移的第二账号论文')
+        second = self.upload(self.create(title='云端迁移的第二账号论文'))
         options = self.data / 'backup-client.cnf'
         options.write_text('[client]\nhost=127.0.0.1\nport={}\nuser=root\n'.format(self.mysql_port), encoding='utf-8')
         options.chmod(0o600)
+        self.process.terminate()
+        self.process.wait(timeout=10)
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/backup_mysql.py'), '--database', self.database,
                                  '--defaults-file', str(options), '--key-file', str(self.data / 'database.key'),
                                  '--output', str(self.data / 'snapshots'), '--mysqldump', str(self.bin / 'mysqldump.exe')],
@@ -252,6 +426,11 @@ class MysqlTest(ApiTestCase):
         with tarfile.open(archive, 'r:gz') as stream:
             sql = stream.extractfile('database.sql').read()
             key = stream.extractfile('database.key').read()
+            for name in stream.getnames():
+                if name.startswith('attachments/'):
+                    target = self.data / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(stream.extractfile(name).read())
         self.assertEqual((self.data / 'database.key').read_bytes(), key)
         self.assertIn(b'second-user', sql)
         self.assertNotIn(b'Test-password-2026', sql)
@@ -274,6 +453,7 @@ class MysqlTest(ApiTestCase):
             self.reset_client()
             self.csrf = self.call('POST', '/api/login', {'username': username, 'password': password})['csrf']
             self.assertEqual([expected['id']], [p['id'] for p in self.call('GET', '/api/papers')])
+            self.assertEqual(test_files.PDF, self.download_file(expected))
             self.assertEqual('private-secret-42', self.call('POST', '/api/papers/{}/credentials'.format(expected['id']))['password'])
 
     def test_relational_storage_and_encryption(self):

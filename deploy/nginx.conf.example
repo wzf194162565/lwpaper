@@ -36,4 +36,18 @@ server {
         proxy_send_timeout 120s;
         proxy_cookie_flags paper_session secure;
     }
+    # Binary manuscript uploads and complete encrypted backups have independent limits.
+    location ~ "^/api/(papers/[0-9a-f-]{36}/files|restore-archive)$" {
+        client_max_body_size 600m;
+        client_body_timeout 600s;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:8080;
+        proxy_set_header Origin http://127.0.0.1:8080;
+        proxy_set_header Connection "";
+        proxy_request_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_cookie_flags paper_session secure;
+    }
 }

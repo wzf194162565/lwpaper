@@ -4,7 +4,7 @@
 
 以下按 Alibaba Cloud Linux / Ubuntu、systemd、Nginx 1.20+ 部署；程序支持多账号注册和独立工作空间，尚未提供团队共享空间与角色分工。默认使用加密文件存储；需要 MySQL 时按第 3 步配置。Windows Server 可运行根目录 `start.cmd`，仅监听本机；下述 systemd/Nginx 命令面向 Linux。
 
-应用与数据一起部署时，小规模使用可在同一台 ECS 上运行 Java、Nginx 和 MySQL；需要独立数据库托管时将 MySQL 换成 RDS 内网实例。MySQL 的业务记录保存在数据库数据目录，投稿密码密钥保存在应用的 `data/database.key`，两部分都需要持久保存。服务器重启后由 systemd 启动服务。
+应用与数据一起部署时，小规模使用可在同一台 ECS 上运行 Java、Nginx 和 MySQL；需要独立数据库托管时将 MySQL 换成 RDS 内网实例。MySQL 的业务记录保存在数据库数据目录，投稿密码密钥保存在应用的 `data/database.key`，还需持久保存 `data/attachments/` 中的加密稿件和各空间的 `files.key`。服务器重启后由 systemd 启动服务。
 
 ## 1. 上传与校验
 
@@ -95,7 +95,7 @@ sudoedit /opt/paper-desk/config/application.properties
 
 填写 `db.host`、`db.port`、`db.name`、`db.username`、`db.password`，保留 `app.storage=mysql`。同机部署填写 `127.0.0.1`、`3306`、`lunwen`、`paperdesk_app` 及刚设置的数据库密码。不要直接复制本机连接配置；服务器上的 `127.0.0.1` 指向服务器本身。使用 RDS 时在控制台创建数据库和账号，填写 ECS 可访问的 RDS 内网地址，并配置 RDS 白名单及对应数据库权限。
 
-建议预先建立独立数据库并使用该库的专用账号；程序需要该库的业务读写、建表、索引、外键及 ALTER 权限。启动会自动执行包内 V001–V004 升级脚本，V004 增加客户收款定金约定，旧记录默认 0，保留原服务费用与实际流水。远程数据库优先配置可信 TLS 证书和 `db.sslMode=VERIFY_IDENTITY`；模板中的 PREFERRED 是同机连接示例。独立投稿密钥默认生成在 `/opt/paper-desk/data/database.key`。
+建议预先建立独立数据库并使用该库的专用账号；程序需要该库的业务读写、建表、索引、外键及 ALTER 权限。启动会自动执行包内 V001–V006 升级脚本，V006 增加跟进事项与由来，旧记录默认为空；V005 增加稿件文件信息及投稿版本关联；V004 增加客户收款定金约定，旧记录默认 0，保留原服务费用与实际流水。远程数据库优先配置可信 TLS 证书和 `db.sslMode=VERIFY_IDENTITY`；模板中的 PREFERRED 是同机连接示例。独立投稿密钥默认生成在 `/opt/paper-desk/data/database.key`。
 
 然后执行上一段启动命令。连接失败时查看日志；程序不会自动从 MySQL 回退为文件模式。
 
@@ -134,7 +134,7 @@ sudo systemctl enable --now nginx
 sudo systemctl reload nginx
 ```
 
-通过 `https://你的域名` 登录，验证新建、保存、备份下载。启用 SELinux 的系统若 Nginx 返回 502 且审计日志提示禁止连接后端，可执行 `sudo setsebool -P httpd_can_network_connect 1`，再重试。
+更新已有 Nginx 配置时，请同步模板新增的文件传输 location：普通 JSON 请求保持 12MB 限制，稿件默认单文件 50MB，附件 ZIP 恢复最多 600MB。通过 `https://你的域名` 登录，验证新建、保存、稿件上传下载和备份恢复。启用 SELinux 的系统若 Nginx 返回 502 且审计日志提示禁止连接后端，可执行 `sudo setsebool -P httpd_can_network_connect 1`，再重试。
 
 程序只接受本机 Host 与 Origin。模板会先验证公网 Origin，再转换为后端的本机来源，并为登录 Cookie 加上 Secure；直接转发原始 Host/Origin 会出现 403。请保留来源校验，仅在模板明确配置的 HTTPS 域名提供服务。如修改后端端口，同步修改 systemd 服务的 `APP_PORT` 及 Nginx 的 `proxy_pass`、Host、Origin，执行 `systemctl daemon-reload` 并重启服务。
 
@@ -149,7 +149,7 @@ sudo journalctl -u paper-desk -n 100 --no-pager
 sudo journalctl -u paper-desk -f
 ```
 
-保留 `/opt/paper-desk/config/application.properties` 和整个 `/opt/paper-desk/data/`。使用界面定期下载加密备份；MySQL 若做数据库快照或转储，需另外保存匹配的 `database.key`。配置密码如包含反斜杠，应遵循 Java properties 格式（反斜杠写为 `\\`）。
+保留 `/opt/paper-desk/config/application.properties` 和整个 `/opt/paper-desk/data/`。使用界面定期下载包含历史稿件的加密 ZIP 备份；整库快照或转储须同时保存匹配的 `database.key`、`data/attachments/` 及其中各空间的 `files.key`。配置密码如包含反斜杠，应遵循 Java properties 格式（反斜杠写为 `\\`）。
 
 包内 `tools/backup_mysql.py` 提供整库和密钥的一致备份及校验，定时任务示例为 `deploy/backup.cron.example`；配置步骤见 [MySQL 全量迁移与备份](MYSQL-MIGRATION.md)。
 

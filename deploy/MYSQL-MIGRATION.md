@@ -1,6 +1,6 @@
 # MySQL 全量迁移与备份
 
-适用于把当前 MySQL 的全部账号、独立空间、客户、论文、历次投稿及收支迁移到 ECS 或 RDS。全量迁移保留原来的登录账号和密码。应用界面的 `.vault` 备份只包含当前账号的业务数据，适合单账号导入。
+适用于把当前 MySQL 的全部账号、独立空间、客户、论文、历次投稿及收支迁移到 ECS 或 RDS。全量迁移保留原来的登录账号和密码。应用界面的备份只包含当前账号：有稿件时为包含加密稿件的 ZIP，无稿件时仍为 `.vault`，适合单账号导入。
 
 迁移期间先暂停本机录入，直到确认云端成为正式使用入口。以下整库恢复步骤用于新建的空目标数据库；已有业务的数据库应先做独立备份，再制定合并或替换方案。
 
@@ -8,7 +8,7 @@
 
 复制 `deploy/mysql-client.example.cnf` 为 `data/migration-client.cnf`，在本机编辑其中的 host、port、user、password，使其与当前 MySQL 配置一致。该文件属于 MySQL 客户端格式，与 Java 的 `application.properties` 格式不同；密码不写进命令参数。
 
-PowerShell 在项目根目录执行，数据库名和密钥路径按实际配置修改：
+先停止应用 Java 进程，保持 MySQL 服务运行，再在 PowerShell 项目根目录执行。工具会检查应用数据目录的运行锁，确保数据库与稿件处于同一快照。数据库名和密钥路径按实际配置修改；若密钥不在应用数据目录，必须用 `--attachments-dir` 指定真实 `data/attachments` 路径：
 
 ```powershell
 python scripts/backup_mysql.py --database lunwen --defaults-file data/migration-client.cnf --key-file data/database.key --output data/cloud-migration
@@ -20,6 +20,7 @@ python scripts/backup_mysql.py --database lunwen --defaults-file data/migration-
 
 - `database.sql`：整个应用数据库，含所有账号及空间。
 - `database.key`：与投稿密码密文匹配的原始密钥。
+- `attachments/`：所有工作空间的加密稿件及各自的 `files.key`（有稿件时包含）。
 - `MANIFEST.json`：数据库名、时间、文件大小及 SHA-256 校验。
 
 这是包含业务数据和密钥的私有备份，与公开程序部署包分别保存、上传，不放入网站目录或代码仓库。脚本不会复制数据库连接密码。Linux 下备份文件权限为 600，未完成的导出不会发布为备份。
@@ -53,6 +54,11 @@ sudo mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_sch
 ```bash
 sudo mysql < ~/paper-desk-migration/database.sql
 sudo install -m 0600 -o paperdesk -g paperdesk ~/paper-desk-migration/database.key /opt/paper-desk/data/database.key
+if [ -d ~/paper-desk-migration/attachments ]; then
+  sudo cp -a ~/paper-desk-migration/attachments /opt/paper-desk/data/
+  sudo chown -R paperdesk:paperdesk /opt/paper-desk/data/attachments
+  sudo chmod -R go-rwx /opt/paper-desk/data/attachments
+fi
 sudo systemctl start paper-desk
 sudo systemctl status paper-desk --no-pager
 curl -fsS http://127.0.0.1:8080/api/session
@@ -87,7 +93,7 @@ sudoedit /etc/paper-desk/mysql-backup.cnf
 填写云端数据库连接信息，先手动验证一次完整备份：
 
 ```bash
-sudo python3 /opt/paper-desk/tools/backup_mysql.py --database lunwen --defaults-file /etc/paper-desk/mysql-backup.cnf --key-file /opt/paper-desk/data/database.key --output /var/backups/paper-desk
+sudo bash /opt/paper-desk/deploy/backup.sh --database lunwen --defaults-file /etc/paper-desk/mysql-backup.cnf --key-file /opt/paper-desk/data/database.key --output /var/backups/paper-desk
 ```
 
 确认成功后启用每天 03:20 的任务：
@@ -96,4 +102,4 @@ sudo python3 /opt/paper-desk/tools/backup_mysql.py --database lunwen --defaults-
 sudo install -m 0644 /opt/paper-desk/deploy/backup.cron.example /etc/cron.d/paper-desk-backup
 ```
 
-备份使用事务快照，可以在应用运行时执行；不会自动删除旧备份。按实际磁盘容量安排保留周期，并把副本保存到 ECS 之外，例如私有 OSS 存储桶或本地离线存储。ECS 与本机数据库的独立加密密钥都需要和各自备份匹配保存。
+整库备份脚本需要应用停止写入。定时任务通过 `deploy/backup.sh` 短暂停止服务，备份数据库、密钥和稿件后恢复原来的运行状态，失败时也会尝试重新启动；期间页面会暂时无法访问。单账号界面备份可在线使用。备份不会自动删除旧版本。按实际磁盘容量安排保留周期，并把副本保存到 ECS 之外，例如私有 OSS 存储桶或本地离线存储。ECS 与本机数据库的独立加密密钥都需要和各自备份匹配保存。

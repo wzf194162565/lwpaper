@@ -3,10 +3,82 @@ import base64
 import json
 import pathlib
 import subprocess
+from datetime import date, timedelta
 from test_system import ApiTestCase, ROOT
 
 
 class BusinessTest(ApiTestCase):
+    def test_delivery_date_synchronizes_status_and_stops_overdue(self):
+        self.setup_account()
+        today = date.today()
+        start, due, delivered = (today - timedelta(days=3)).isoformat(), (today - timedelta(days=1)).isoformat(), today.isoformat()
+        for status in ('待分配', '写作中', '待修改', '已交稿', '已完成', '已取消'):
+            with self.subTest(status=status):
+                paper = self.call('POST', '/api/papers', {
+                    'title': '交稿状态-' + status, 'writingStatus': status,
+                    'writingStartAt': start, 'writingDueAt': due, 'writingDeliveredAt': delivered}, expected=201)
+                expected = '已交稿' if status in ('待分配', '写作中') else status
+                self.assertEqual(expected, paper['writingStatus'])
+                self.assertFalse(paper['writingOverdue'])
+                self.assertEqual(delivered, paper['writingDeliveredAt'])
+                self.assertEqual(3, paper['writingDays'])
+        paper = self.call('POST', '/api/papers', {
+            'title': '先写作再交稿', 'writingStatus': '写作中',
+            'writingStartAt': start, 'writingDueAt': due}, expected=201)
+        path = '/api/papers/' + paper['id']
+        self.assertTrue(paper['writingOverdue'])
+        paper = self.call('PUT', path, {'version': paper['version'], 'writingDeliveredAt': delivered})
+        self.assertEqual('已交稿', paper['writingStatus'])
+        self.assertFalse(paper['writingOverdue'])
+        self.call('PUT', path, {'version': paper['version'], 'writingDeliveredAt': (today + timedelta(days=1)).isoformat()}, expected=400)
+        self.assertEqual(paper['version'], self.call('GET', path)['version'])
+        self.call('PUT', path, {'version': paper['version'], 'writingDeliveredAt': (today - timedelta(days=4)).isoformat()}, expected=400)
+        self.assertEqual(paper['version'], self.call('GET', path)['version'])
+        paper = self.call('PUT', path, {'version': paper['version'], 'writingStatus': '写作中', 'writingDeliveredAt': ''})
+        self.assertEqual('写作中', paper['writingStatus'])
+        self.assertTrue(paper['writingOverdue'])
+        paper = self.call('PUT', path, {'version': paper['version'], 'writingStatus': '已完成'})
+        self.assertEqual(delivered, paper['writingDeliveredAt'])
+        self.assertFalse(paper['writingOverdue'])
+
+    def test_legacy_delivered_writing_records_are_consistent_in_every_view(self):
+        self.setup_account()
+        customer = self.call('POST', '/api/customers', {'name': '交稿回归客户'}, expected=201)
+        today = date.today()
+        paper = self.call('POST', '/api/papers', {
+            'title': '已有交稿日期的旧记录', 'customerId': customer['id'], 'writingStatus': '已交稿',
+            'writingStartAt': (today - timedelta(days=3)).isoformat(),
+            'writingDueAt': (today - timedelta(days=1)).isoformat(), 'writingDeliveredAt': today.isoformat()}, expected=201)
+        archive = self.data / 'legacy-writing.vault'
+        archive.write_bytes(self.call('GET', '/api/backup', raw=True))
+        helper = self.data / 'writing-fixture'
+        helper.mkdir()
+        subprocess.run(['javac', '-encoding', 'UTF-8', '--release', '17', '-d', str(helper),
+                        *[str(p) for p in (ROOT / 'src').glob('*.java')],
+                        str(ROOT / 'tests/WritingFixture.java')], cwd=ROOT, check=True, capture_output=True)
+        subprocess.run(['java', '-cp', str(helper), 'WritingFixture',
+                        str(archive), 'Test-password-2026'], cwd=ROOT, check=True, capture_output=True)
+        self.call('POST', '/api/restore', {'backup': base64.b64encode(archive.read_bytes()).decode(), 'password': 'Test-password-2026'})
+        path = '/api/papers/' + paper['id']
+        views = [self.call('GET', path), self.call('GET', '/api/papers')[0],
+                 self.call('GET', '/api/customers/' + customer['id'])['papers'][0]]
+        for result in views:
+            self.assertEqual('已交稿', result['writingStatus'])
+            self.assertFalse(result['writingOverdue'])
+            self.assertEqual(3, result['writingDays'])
+            self.assertEqual(paper['version'], result['version'])
+            self.assertEqual(today.isoformat(), result['writingDeliveredAt'])
+        paper = self.call('PUT', path, {'version': paper['version'], 'notes': '保留原始交稿日期'})
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.reset_client()
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        restored = self.call('GET', path)
+        self.assertEqual('已交稿', restored['writingStatus'])
+        self.assertFalse(restored['writingOverdue'])
+        self.assertEqual(today.isoformat(), restored['writingDeliveredAt'])
+
     def test_customer_deposit_terms_persist_without_creating_payments(self):
         self.setup_account()
         customer = self.call('POST', '/api/customers', {'name': '定金约定客户'}, expected=201)
@@ -327,6 +399,93 @@ class BusinessTest(ApiTestCase):
         self.assertEqual(0, self.call('GET', f"/api/customers/{customer['id']}")['paperCount'])
         self.call('DELETE', f"/api/customers/{customer['id']}", {'version': renamed['version']})
 
+
+    def test_submission_edits_keep_identity_count_and_current_pointer(self):
+        self.setup_account()
+        paper = self.call('POST', '/api/papers', {'title': '编辑投稿回归'}, expected=201)
+        path = f"/api/papers/{paper['id']}"
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': '原期刊', 'submissionPassword': 'retained-test-secret'}, expected=201)
+        original_id = paper['activeSubmissionId']
+        for status in ['修改中', '已录用', '已发表', '修改中']:
+            sub = paper['submissions'][0]
+            paper = self.call('PUT', path + '/submissions/' + original_id, {
+                'version': sub['version'], 'status': status, 'submittedAt': '2026-01-01'})
+            self.assertEqual([original_id], [s['id'] for s in paper['submissions']])
+            self.assertEqual(original_id, paper['activeSubmissionId'])
+            self.assertEqual(status, paper['status'])
+            self.assertEqual(status, paper['submissions'][0]['status'])
+            self.assertEqual(sub['version'] + 1, paper['submissions'][0]['version'])
+        paper = self.call('GET', path)
+        self.call('PUT', path + '/submissions/missing-record', {'version': 1, 'journal': '意外新增'}, expected=404)
+        self.call('PUT', path + '/submissions/' + original_id, {'version': 1, 'status': '已发表'}, expected=409)
+        self.assertEqual(paper, self.call('GET', path))
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': '改投期刊', 'status': '审稿中', 'submittedAt': '2026-02-01'}, expected=201)
+        paper = self.call('GET', path)
+        current_id = paper['activeSubmissionId']
+        current = paper['submissions'][1].copy()
+        sub = paper['submissions'][0]
+        paper = self.call('PUT', path + '/submissions/' + original_id, {
+            'version': sub['version'], 'status': '已拒稿', 'notes': '只修改历史投稿'})
+        self.assertEqual([original_id, current_id], [s['id'] for s in paper['submissions']])
+        self.assertEqual(current_id, paper['activeSubmissionId'])
+        self.assertEqual(current, paper['submissions'][1])
+        self.assertEqual('审稿中', paper['status'])
+        self.assertEqual('retained-test-secret', self.call('POST', path + '/submissions/' + original_id + '/credentials')['password'])
+        paper = self.call('PUT', path, {'version': paper['version'], 'title': '仅修改论文档案'})
+        self.assertEqual([original_id, current_id], [s['id'] for s in paper['submissions']])
+
+    def test_duplicate_journal_creation_is_atomic_and_existing_edits_still_work(self):
+        self.setup_account()
+        paper = self.call('POST', '/api/papers', {'title': '同名论文'}, expected=201)
+        path = f"/api/papers/{paper['id']}"
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': 'Nature Communications', 'status': '修改中',
+            'submittedAt': '2026-01-01'}, expected=201)
+        paper = self.call('GET', path)
+        for journal in ['Nature Communications', ' nature communications ', 'ＮＡＴＵＲＥ　ＣＯＭＭＵＮＩＣＡＴＩＯＮＳ']:
+            self.call('POST', path + '/submissions', {'version': paper['version'], 'journal': journal}, expected=409)
+            self.assertEqual(paper, self.call('GET', path))
+        original_id = paper['activeSubmissionId']
+        paper = self.call('PUT', path + '/submissions/' + original_id, {
+            'version': paper['submissions'][0]['version'], 'status': '已发表'})
+        paper = self.call('GET', path)
+        error = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': 'nature communications'}, expected=409)
+        self.assertIn('已发表', error['error'])
+        self.assertEqual(paper, self.call('GET', path))
+        other = self.call('POST', '/api/papers', {'title': '同名论文'}, expected=201)
+        other = self.call('POST', f"/api/papers/{other['id']}/submissions", {
+            'version': other['version'], 'journal': 'nature communications'}, expected=201)
+        self.assertEqual(1, len(other['submissions']))
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': '其他期刊'}, expected=201)
+        paper = self.call('GET', path)
+        current = paper['submissions'][1]
+        self.call('PUT', path + '/submissions/' + current['id'], {
+            'version': current['version'], 'journal': 'Ｎａｔｕｒｅ Communications'}, expected=409)
+        self.assertEqual(paper, self.call('GET', path))
+
+    def test_reopening_an_old_attempt_cannot_duplicate_an_active_attempt(self):
+        self.setup_account()
+        paper = self.call('POST', '/api/papers', {'title': '再次投稿'}, expected=201)
+        path = f"/api/papers/{paper['id']}"
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': '同一期刊', 'status': '已拒稿',
+            'submittedAt': '2026-01-01', 'endedAt': '2026-01-15'}, expected=201)
+        old = paper['submissions'][0]
+        paper = self.call('POST', path + '/submissions', {
+            'version': paper['version'], 'journal': '同一期刊', 'status': '修改中', 'submittedAt': '2026-02-01'}, expected=201)
+        paper = self.call('GET', path)
+        self.call('PUT', path + '/submissions/' + old['id'], {
+            'version': old['version'], 'status': '修改中'}, expected=409)
+        self.assertEqual(paper, self.call('GET', path))
+        paper = self.call('PUT', path + '/submissions/' + old['id'], {
+            'version': old['version'], 'notes': '补充原投稿的拒稿原因'})
+        self.assertEqual('已拒稿', paper['submissions'][0]['status'])
+        self.assertEqual('修改中', paper['submissions'][1]['status'])
+        self.assertEqual(2, len(paper['submissions']))
 
     def test_submission_version_validation_and_preserve_hidden_password(self):
         self.setup_account()

@@ -40,7 +40,7 @@ class ApiTestCase(unittest.TestCase):
         self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def start_server(self):
-        self.process = subprocess.Popen(['java', '-Dapp.storage=file', f'-Dapp.port={self.port}', f'-Dapp.data={self.data}',
+        self.process = subprocess.Popen(['java', *getattr(self, 'JAVA_OPTIONS', []), '-Dapp.storage=file', f'-Dapp.port={self.port}', f'-Dapp.data={self.data}',
                                          '-cp', 'out', 'Main'], cwd=ROOT, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
         for _ in range(100):

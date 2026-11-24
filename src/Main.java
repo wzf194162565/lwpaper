@@ -1,6 +1,9 @@
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.nio.channels.FileChannel;
@@ -31,6 +34,8 @@ public class Main {
         Path root = Path.of(System.getProperty("app.root", ".")).toAbsolutePath().normalize();
         Path data = Path.of(System.getProperty("app.data", root.resolve("data").toString())).toAbsolutePath().normalize();
         DatabaseConfig config = new DatabaseConfig(root, data);
+        if(System.getProperty("app.fileMaxMb")==null)System.setProperty("app.fileMaxMb",config.value("app.fileMaxMb","APP_FILE_MAX_MB","50"));
+        AttachmentService.maxBytes();
         Files.createDirectories(data);
         FileChannel channel = FileChannel.open(data.resolve("app.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
         FileLock lock = channel.tryLock();
@@ -86,11 +91,13 @@ public class Main {
                 String origin = ex.getRequestHeaders().getFirst("Origin");
                 if (origin != null && !origin.equals("http://" + host)) throw new ApiException(403, "请求来源无效");
                 String type = ex.getRequestHeaders().getFirst("Content-Type");
-                if (type == null || !type.toLowerCase(Locale.ROOT).startsWith("application/json")) throw new ApiException(415, "请求需要使用 JSON 格式");
+                boolean binary=method.equals("POST")&&(path.matches("/api/papers/[0-9a-f\\-]{36}/files")||path.equals("/api/restore-archive"));
+                String expected=binary?"application/octet-stream":"application/json";
+                if (type == null || !type.toLowerCase(Locale.ROOT).split(";",2)[0].trim().equals(expected)) throw new ApiException(415, "请求格式不正确");
             }
             if (path.equals("/api/session") && method.equals("GET")) {
                 Session session = session(ex);
-                json(ex, 200, Map.of("initialized", accounts.initialized(), "authenticated", session != null, "username", session == null ? "" : session.store().username(), "csrf", session == null ? "" : session.csrf(), "storage", accounts.storageType())); return;
+                json(ex, 200, Map.of("initialized", accounts.initialized(), "authenticated", session != null, "username", session == null ? "" : session.store().username(), "csrf", session == null ? "" : session.csrf(), "storage", accounts.storageType(),"fileMaxBytes",AttachmentService.maxBytes(),"writerPaymentsSupported",true)); return;
             }
             if ((path.equals("/api/setup") || path.equals("/api/register") || path.equals("/api/login")) && method.equals("POST")) {
                 throttle(ex);
@@ -144,6 +151,7 @@ public class Main {
                 return;
             }
             if (path.equals("/api/papers") && method.equals("GET")) { json(ex, 200, papers.list()); return; }
+            if (path.equals("/api/account/authors") && method.equals("GET")) { json(ex, 200, business.accountAuthors()); return; }
             if (path.equals("/api/papers") && method.equals("POST")) { json(ex, 201, papers.create(body(ex))); return; }
             if (path.equals("/api/customers") && method.equals("GET")) { json(ex, 200, business.customers()); return; }
             if (path.equals("/api/customers") && method.equals("POST")) { json(ex, 201, business.createCustomer(body(ex))); return; }
@@ -160,6 +168,21 @@ public class Main {
             if (path.startsWith("/api/papers/")) {
                 String[] parts = path.substring("/api/papers/".length()).split("/");
                 String id = parts[0];
+                if(parts.length==2&&parts[1].equals("files")&&method.equals("POST")) {
+                    long version;
+                    try{version=Long.parseLong(Objects.toString(ex.getRequestHeaders().getFirst("X-Paper-Version"),""));}catch(NumberFormatException e){throw new ApiException(400,"请提供论文版本号");}
+                    String length=ex.getRequestHeaders().getFirst("Content-Length");
+                    if(length!=null&&Long.parseLong(length)>AttachmentService.maxBytes())throw new ApiException(413,"文件超过允许大小");
+                    json(ex,201,new AttachmentService(vault).upload(id,decodedHeader(ex,"X-File-Name"),decodedHeader(ex,"X-File-Note"),version,Objects.toString(ex.getRequestHeaders().getFirst("X-Upload-Id"),""),ex.getRequestBody()));return;
+                }
+                if(parts.length==3&&parts[1].equals("files")&&method.equals("GET")) {
+                    synchronized(vault) {
+                        AttachmentService files=new AttachmentService(vault);
+                        Map<String,Object> file=AttachmentService.find(PaperService.find(vault.read(),id),parts[2]);
+                        Path plain=files.download(id,parts[2]);
+                        try{sendFile(ex,plain,Main.string(file,"filename"));}finally{Files.deleteIfExists(plain);}
+                    }return;
+                }
                 if (parts.length == 2 && parts[1].equals("submissions") && method.equals("POST")) { json(ex, 201, business.addSubmission(id, body(ex))); return; }
                 if (parts.length == 3 && parts[1].equals("submissions")) {
                     switch (method) {
@@ -174,7 +197,13 @@ public class Main {
                     switch (method) {
                         case "GET" -> json(ex, 200, papers.get(id));
                         case "PUT" -> json(ex, 200, papers.update(id, body(ex)));
-                        case "DELETE" -> { papers.delete(id, body(ex)); json(ex, 200, Map.of("ok", true)); }
+                        case "DELETE" -> {
+                            synchronized(vault) {
+                                List<Map<String,Object>> files=AttachmentService.files(PaperService.find(vault.read(),id)).stream().map(Json::object).toList();
+                                papers.delete(id, body(ex));new AttachmentService(vault).removeBlobs(files);
+                            }
+                            json(ex, 200, Map.of("ok", true));
+                        }
                         default -> throw new ApiException(405, "不支持的请求方法");
                     }
                     return;
@@ -184,12 +213,31 @@ public class Main {
                 if (parts.length == 3 && parts[1].equals("transactions") && method.equals("DELETE")) { json(ex, 200, papers.deleteTransaction(id, parts[2], body(ex))); return; }
             }
             if (path.equals("/api/backup") && method.equals("GET")) {
-                ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=paper-desk-" + java.time.LocalDate.now() + ".vault");
-                send(ex, 200, "application/octet-stream", vault.backup()); return;
+                synchronized(vault) {
+                    if(!AttachmentService.all(vault.read()).isEmpty()) {
+                        Path archive=AttachmentArchive.backup(vault);
+                        try{sendFile(ex,archive,"paper-desk-"+java.time.LocalDate.now()+".zip");}finally{Files.deleteIfExists(archive);}
+                        return;
+                    }
+                    ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=paper-desk-" + java.time.LocalDate.now() + ".vault");
+                    send(ex, 200, "application/octet-stream", vault.backup()); return;
+                }
+            }
+            if(path.equals("/api/restore-archive")&&method.equals("POST")) {
+                AttachmentArchive.restore(vault,ex.getRequestBody(),decodedHeader(ex,"X-Backup-Password"));
+                json(ex,200,Map.of("ok",true));return;
             }
             if (path.equals("/api/restore") && method.equals("POST")) {
                 Map<String, Object> body = body(ex);
-                try { vault.restore(Base64.getDecoder().decode(string(body, "backup")), string(body, "password")); }
+                try {
+                    byte[] encoded=Base64.getDecoder().decode(string(body,"backup"));
+                    if(encoded.length>8*1024*1024)throw new ApiException(413,"备份文件过大");
+                    synchronized(vault) {
+                        if(!AttachmentService.all(Vault.readBackup(encoded,string(body,"password"))).isEmpty())throw new ApiException(400,"包含稿件的备份请使用完整 ZIP 备份恢复");
+                        List<Map<String,Object>> previous=AttachmentService.all(vault.read());
+                        vault.restore(encoded,string(body,"password"));new AttachmentService(vault).removeBlobs(previous);
+                    }
+                }
                 catch (IllegalArgumentException e) { throw new ApiException(400, "备份文件格式不正确"); }
                 json(ex, 200, Map.of("ok", true)); return;
             }
@@ -210,6 +258,7 @@ public class Main {
             case "/", "/index.html" -> "index.html";
             case "/app.js" -> "app.js";
             case "/business.js" -> "business.js";
+            case "/files.js" -> "files.js";
             case "/styles.css" -> "styles.css";
             case "/favicon.svg" -> "favicon.svg";
             default -> throw new ApiException(404, "页面不存在");
@@ -280,6 +329,17 @@ public class Main {
         ex.getResponseHeaders().set("Content-Type", type);
         ex.sendResponseHeaders(code, bytes.length);
         ex.getResponseBody().write(bytes);
+    }
+    private static String decodedHeader(HttpExchange ex,String name) {
+        try{return URLDecoder.decode(Objects.toString(ex.getRequestHeaders().getFirst(name),""),StandardCharsets.UTF_8);}
+        catch(IllegalArgumentException e){throw new ApiException(400,"文件请求参数格式无效");}
+    }
+    private void sendFile(HttpExchange ex,Path file,String name) throws IOException {
+        String encoded=URLEncoder.encode(name,StandardCharsets.UTF_8).replace("+","%20");
+        ex.getResponseHeaders().set("Content-Type","application/octet-stream");
+        ex.getResponseHeaders().set("Content-Disposition","attachment; filename=paper-desk-download; filename*=UTF-8''"+encoded);
+        ex.sendResponseHeaders(200,Files.size(file));
+        try(OutputStream output=ex.getResponseBody()){Files.copy(file,output);}
     }
 }
 

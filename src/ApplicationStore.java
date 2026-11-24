@@ -8,4 +8,7 @@ public interface ApplicationStore extends BusinessStore {
     byte[] backup() throws Exception;
     void restore(byte[] encoded, String password) throws Exception;
     String storageType();
+    java.nio.file.Path attachmentDirectory();
+    byte[] encodeBackup(java.util.Map<String, Object> state) throws Exception;
+    void restoreState(java.util.Map<String, Object> state) throws Exception;
 }

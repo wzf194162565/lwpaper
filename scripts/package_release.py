@@ -12,8 +12,8 @@ import tempfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-WEB_FILES = ('index.html', 'app.js', 'business.js', 'styles.css', 'favicon.svg')
-SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql', 'V004__customer_payment_deposit.sql')
+WEB_FILES = ('index.html', 'app.js', 'business.js', 'files.js', 'styles.css', 'favicon.svg')
+SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql', 'V004__customer_payment_deposit.sql', 'V005__paper_files.sql', 'V006__follow_up_reason.sql', 'V007__customer_classification.sql')
 
 
 def copy_file(source, target):
@@ -69,7 +69,7 @@ def build():
         for filename in ('start.sh', 'start.cmd', 'install.sh', 'DEPLOY.md'):
             copy_file(ROOT / 'deploy' / filename, release / filename)
         copy_file(ROOT / 'deploy/MYSQL-MIGRATION.md', release / 'MYSQL-MIGRATION.md')
-        for filename in ('paper-desk.service', 'nginx.conf.example', 'mysql-init.sql.example', 'backup.cron.example'):
+        for filename in ('paper-desk.service', 'nginx.conf.example', 'mysql-init.sql.example', 'backup.cron.example', 'backup.sh'):
             copy_file(ROOT / 'deploy' / filename, release / 'deploy' / filename)
         copy_file(ROOT / 'scripts/backup_mysql.py', release / 'tools/backup_mysql.py')
         copy_file(ROOT / 'deploy/mysql-client.example.cnf', release / 'config/mysql-client.example.cnf')

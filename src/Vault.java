@@ -51,6 +51,8 @@ public final class Vault implements ApplicationStore {
     }
     public synchronized String username() { return state == null ? "" : Main.string(state, "username"); }
     public String storageType() { return "file"; }
+    public Path attachmentDirectory() { return file.getParent().resolve("attachments"); }
+    public synchronized byte[] encodeBackup(Map<String, Object> data) throws Exception { return encode(data, key, salt); }
     public synchronized Map<String, Object> read() {
         if (state == null) throw new ApiException(401, "请先登录");
         return copy(state);
@@ -67,6 +69,10 @@ public final class Vault implements ApplicationStore {
         try { loaded = decode(encoded, derive(password, savedSalt)); }
         catch (GeneralSecurityException | IllegalArgumentException e) { throw new ApiException(400, "无法读取备份，请检查备份密码和文件完整性"); }
         BusinessService.migrate(loaded);
+        validateState(loaded);
+        restoreState(loaded);
+    }
+    public synchronized void restoreState(Map<String, Object> loaded) throws Exception {
         validateState(loaded);
         // Restore business data while keeping this installation's login account and password.
         loaded.put("username", Main.string(state, "username"));
@@ -129,6 +135,7 @@ public final class Vault implements ApplicationStore {
                 if (!ids.add(Main.string(paper, "id"))) throw new IllegalArgumentException();
             }
             BusinessService.validateState(data);
+            AttachmentService.validate(data);
         } catch (IllegalArgumentException | ApiException e) { throw new ApiException(400, "数据文件结构无效，无法导入"); }
     }
     static String validateUsername(String username) {

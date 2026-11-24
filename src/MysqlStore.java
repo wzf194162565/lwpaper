@@ -143,9 +143,18 @@ public final class MysqlStore implements ApplicationStore {
         if(backupCipher==null)throw new ApiException(401,"请先登录");
         return backupCipher.encrypt(read());
     }
+    public Path attachmentDirectory() { return config.data.resolve("attachments").resolve(workspace); }
+    public synchronized byte[] encodeBackup(Map<String,Object> state) throws Exception {
+        if(backupCipher==null)throw new ApiException(401,"请先登录");
+        return backupCipher.encrypt(state);
+    }
     public synchronized void restore(byte[] encoded,String password) throws Exception {
         if(encoded.length>8*1024*1024||password.length()>128)throw new ApiException(400,"备份文件过大或密码格式不正确");
         Map<String,Object> loaded=Vault.readBackup(encoded,password);
+        restoreState(loaded);
+    }
+    public synchronized void restoreState(Map<String,Object> loaded) throws Exception {
+        Vault.validateState(loaded);
         // Importing another account's backup creates independent entities in this workspace.
         if(!username.equals(Main.string(loaded,"username"))) reidentify(loaded);
         mutate(state->{state.put("customers",loaded.get("customers"));state.put("papers",loaded.get("papers"));return null;});
@@ -174,6 +183,7 @@ public final class MysqlStore implements ApplicationStore {
             try{
                 lock(c);
                 if(memberCount(c)>0)throw new ApiException(409,"数据库已初始化，未覆盖现有账号或业务记录，请直接登录");
+                if(sourceHash!=null)importLegacyFiles(state);
                 String id=UUID.randomUUID().toString(),member=UUID.randomUUID().toString();
                 execute(c,"INSERT INTO lw_user(id,username,password_hash,status,version,created_at,updated_at) VALUES(?,?,?,'enabled',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",id,account,DatabaseCrypto.hashPassword(password));
                 execute(c,"INSERT INTO lw_workspace_member(id,workspace_id,user_id,status,created_at) VALUES(?,?,?,'enabled',UTC_TIMESTAMP(6))",member,workspace,id);
@@ -185,6 +195,21 @@ public final class MysqlStore implements ApplicationStore {
         }
     }
     private static Map<String,Object> emptyState(String username){Map<String,Object> state=new LinkedHashMap<>();state.put("schema",2);state.put("username",username);state.put("customers",new ArrayList<>());state.put("papers",new ArrayList<>());return state;}
+    private void importLegacyFiles(Map<String,Object> state) throws Exception {
+        List<Map<String,Object>> entries=AttachmentService.all(state);if(entries.isEmpty())return;
+        AttachmentService source=new AttachmentService(new Vault(config.data));byte[] key=source.key(false);
+        Path destination=attachmentDirectory();Files.createDirectories(destination);Path keyPath=destination.resolve("files.key");
+        if(Files.exists(keyPath)&&!Arrays.equals(Base64.getDecoder().decode(Files.readString(keyPath).trim()),key))throw new IllegalStateException("旧稿件密钥与目标附件目录不匹配");
+        if(!Files.exists(keyPath))Files.copy(source.directory.resolve("files.key"),keyPath);
+        for(Map<String,Object> file:entries) {
+            String id=Main.string(file,"id");Path plain=Files.createTempFile(destination,"migrate-",".tmp");
+            try {
+                try(java.io.InputStream input=Files.newInputStream(source.blob(id))){AttachmentService.decrypt(input,plain,key,id,PaperService.number(file.get("size")));}
+                if(Files.size(plain)!=PaperService.number(file.get("size"))||!AttachmentService.hash(plain).equals(Main.string(file,"sha256")))throw new IllegalStateException("旧稿件文件完整性校验失败");
+                Files.copy(source.blob(id),destination.resolve(id+".bin"),StandardCopyOption.REPLACE_EXISTING);
+            }finally{Files.deleteIfExists(plain);}
+        }
+    }
     private void requireAccount(Connection c)throws SQLException {
         if(userId.isEmpty()||scalar(c,"SELECT u.id FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE u.id=? AND m.workspace_id=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator'",userId,workspace).isEmpty())throw new ApiException(401,"账号已失效，请重新登录");
     }
@@ -211,6 +236,9 @@ public final class MysqlStore implements ApplicationStore {
                 migrateCustomerCooperationDate(c);
                 migratePaperServiceType(c);
                 migrateCustomerPaymentDeposit(c);
+                migratePaperFiles(c);
+                migrateFollowUpReason(c);
+                migrateCustomerClassification(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -260,6 +288,53 @@ public final class MysqlStore implements ApplicationStore {
         String constraint=scalar(c,"SELECT constraint_type FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='lw_paper' AND constraint_name='ck_paper_contract_deposit' AND enforced='YES'");
         if(!constraint.equals("CHECK"))throw new IllegalStateException("客户定金金额约束缺失，请检查 V004 升级状态");
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(4,?,?,UTC_TIMESTAMP(6))","客户收款定金约定",checksum);
+    }
+    private void migratePaperFiles(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V005__paper_files.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=5");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("V005 数据库迁移脚本校验不一致");
+            return;
+        }
+        try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        if(scalar(c,"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_submission' AND column_name='manuscript_id'").equals("0"))
+            try(Statement statement=c.createStatement()){statement.execute("ALTER TABLE lw_submission ADD COLUMN manuscript_id VARCHAR(36) NOT NULL DEFAULT '' COMMENT '本次投稿使用的论文文件版本 UUID'");}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(5,?,?,UTC_TIMESTAMP(6))","论文文件与稿件版本",checksum);
+    }
+    private void migrateFollowUpReason(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V006__follow_up_reason.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=6");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V006 数据库迁移脚本校验不一致");
+            return;
+        }
+        String column=scalar(c,"SELECT CONCAT(data_type,':',character_maximum_length,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_paper' AND column_name='follow_up_reason'");
+        if(column.isEmpty()) {
+            try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        }else if(!column.equals("varchar:1000:NO:"))throw new IllegalStateException("跟进事项字段格式不兼容，需要默认空字符串的 VARCHAR(1000) 非空字段");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(6,?,?,UTC_TIMESTAMP(6))","论文跟进事项与由来",checksum);
+    }
+    private void migrateCustomerClassification(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V007__customer_classification.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=7");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V007 数据库迁移脚本校验不一致");
+            return;
+        }
+        List<String> statements=Arrays.stream(script.split(";")).filter(sql->!sql.isBlank()).toList();
+        String[] columns={"customer_type","referrer"},formats={"varchar:20:NO:","varchar:200:NO:"};
+        if(statements.size()!=columns.length)throw new IllegalStateException("V007 数据库迁移脚本格式不正确");
+        // Resume each ALTER independently after an interrupted MySQL DDL operation.
+        for(int i=0;i<columns.length;i++) {
+            String column=scalar(c,"SELECT CONCAT(data_type,':',character_maximum_length,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_customer' AND column_name=?",columns[i]);
+            if(column.isEmpty()) {
+                try(Statement statement=c.createStatement()){statement.execute(statements.get(i));}
+            }else if(!column.equals(formats[i]))throw new IllegalStateException("客户分类字段格式不兼容："+columns[i]);
+        }
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(7,?,?,UTC_TIMESTAMP(6))","客户类型与介绍人",checksum);
     }
     private void seedRoles(Connection c)throws SQLException{
         String[][] roles={{"administrator","空间管理员","当前本机账号，负责全部业务"},{"manager","业务主管","预留：业务管理及任务分配"},{"writer","写作人员","预留：分配给自己的写作任务"},{"submission","投稿专员","预留：分配给自己的投稿记录"},{"finance","财务人员","预留：收支与费用管理"},{"readonly","只读人员","预留：授权范围内的只读查看"}};

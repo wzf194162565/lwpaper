@@ -52,6 +52,24 @@ class BackupTest(unittest.TestCase):
         self.assertNotIn('private-database-password', str(raised.exception))
         self.assertEqual([], list(self.output.iterdir()))
 
+    def test_manuscript_backup_includes_encrypted_blobs_and_keys_but_no_temporaries(self):
+        directory = self.folder / 'attachments' / '00000000-0000-0000-0000-000000000001'
+        directory.mkdir(parents=True)
+        (directory / 'files.key').write_bytes(b'attachment-key')
+        (directory / '11111111-1111-1111-1111-111111111111.bin').write_bytes(b'encrypted-manuscript')
+        (directory / 'upload-private.tmp').write_bytes(b'plain-temporary-content')
+        def dump(command, stdout, stderr):
+            stdout.write(b'CREATE DATABASE lunwen;')
+            return type('Result', (), {'returncode': 0})()
+        with patch('scripts.backup_mysql.subprocess.run', side_effect=dump):
+            archive = backup('lunwen', self.options, self.key, self.output)
+        metadata = verify_backup(archive)
+        self.assertEqual('paper-desk-mysql-backup-v2', metadata['format'])
+        self.assertEqual(4, len(metadata['files']))
+        with tarfile.open(archive, 'r:gz') as stream:
+            self.assertFalse(any(name.endswith('.tmp') for name in stream.getnames()))
+            self.assertEqual(b'encrypted-manuscript', stream.extractfile('attachments/00000000-0000-0000-0000-000000000001/11111111-1111-1111-1111-111111111111.bin').read())
+
     def test_verification_rejects_modified_contents_and_unsafe_entries(self):
         for name in ('database.sql', '../database.sql'):
             archive = self.folder / ('unsafe-' + str(len(name)) + '.tar.gz')

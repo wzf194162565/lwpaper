@@ -1,4 +1,4 @@
 # Copy to /etc/cron.d/paper-desk-backup after configuring the private options file.
 # Install python3 and mysqldump (MySQL client). Store an additional copy outside this ECS instance.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-20 3 * * * root /usr/bin/python3 /opt/paper-desk/tools/backup_mysql.py --defaults-file /etc/paper-desk/mysql-backup.cnf --database lunwen --key-file /opt/paper-desk/data/database.key --output /var/backups/paper-desk
+20 3 * * * root /bin/bash /opt/paper-desk/deploy/backup.sh --defaults-file /etc/paper-desk/mysql-backup.cnf --database lunwen --key-file /opt/paper-desk/data/database.key --attachments-dir /opt/paper-desk/data/attachments --output /var/backups/paper-desk

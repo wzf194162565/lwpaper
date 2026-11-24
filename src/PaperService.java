@@ -9,7 +9,7 @@ public final class PaperService {
     private final BusinessStore vault;
     static final Set<String> STATUSES = Set.of("草稿", "待投稿", "已投稿", "审稿中", "修改中", "已录用", "已发表", "已拒稿", "已撤稿");
     static final Set<String> TYPES = Set.of("incoming_deposit", "incoming_balance", "incoming_other", "outgoing_deposit", "outgoing_balance", "outgoing_other");
-    private static final List<String> FIELDS = List.of("title", "authors", "customer", "writer", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "submittedAt", "followUpAt", "status", "notes");
+    private static final List<String> FIELDS = List.of("title", "authors", "customer", "writer", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "submittedAt", "followUpAt", "followUpReason", "status", "notes");
     public PaperService(BusinessStore vault) { this.vault = vault; }
 
     public List<Object> list() {
@@ -27,13 +27,22 @@ public final class PaperService {
             List<Object> records = Json.array(state.get("papers"));
             if (records.size() >= 10_000) throw new ApiException(400, "本机版最多保存 10000 篇论文");
             Map<String, Object> paper = fields(input, null);
-            String id = UUID.randomUUID().toString();
+            validateFollowUp(paper, null, input);
+            String id = text(input, "createRequestId", 36);
+            if (id.isEmpty()) id = UUID.randomUUID().toString();
+            else {
+                try { if (!UUID.fromString(id).toString().equals(id)) throw new IllegalArgumentException(); }
+                catch (IllegalArgumentException e) { throw new ApiException(400, "新增请求标识不正确，请重新打开表单"); }
+                for (Object item : records) if (Main.string(Json.object(item), "id").equals(id))
+                    throw new ApiException(409, "这篇论文已保存，请刷新列表核对，避免重复登记付款");
+            }
             paper.put("id", id);
             paper.put("code", "LW-" + LocalDate.now().getYear() + "-" + id.substring(0, 8).toUpperCase(Locale.ROOT));
             paper.put("version", 1); paper.put("createdAt", now()); paper.put("updatedAt", now());
             paper.put("transactions", new ArrayList<>());
             paper.put("history", new ArrayList<>(List.of(event(paper, "建立论文档案"))));
             BusinessService.initializePaper(state, paper, input);
+            WriterPayments.apply(paper, input);
             records.add(paper);
             return publicPaper(paper, true, state);
         });
@@ -43,10 +52,19 @@ public final class PaperService {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             Map<String, Object> nextFields = fields(input, paper);
+            WriterPayments.validateTerms(paper, nextFields);
+            validateFollowUp(nextFields, paper, input);
             boolean changed = List.of("status", "journal", "submissionSystem", "submissionUrl", "submittedAt").stream().anyMatch(k -> !Objects.equals(paper.get(k), nextFields.get(k)));
+            boolean followUpChanged = !Main.string(paper,"followUpAt").equals(Main.string(nextFields,"followUpAt")) || !Main.string(paper,"followUpReason").equals(Main.string(nextFields,"followUpReason"));
             paper.putAll(nextFields); touch(paper);
             BusinessService.updatePaper(state, paper, input);
+            WriterPayments.apply(paper, input);
             if (changed) Json.array(paper.get("history")).add(event(paper, "更新投稿进度"));
+            if (followUpChanged) {
+                String date=Main.string(paper,"followUpAt"),reason=Main.string(paper,"followUpReason");
+                String summary=reason.codePointCount(0,reason.length())>120?reason.substring(0,reason.offsetByCodePoints(0,120))+"…":reason;
+                Json.array(paper.get("history")).add(event(paper, (date.isEmpty()?"更新跟进事项":"安排跟进："+date) + (summary.isEmpty()?"":" · "+summary)));
+            }
             return publicPaper(paper, true, state);
         });
     }
@@ -62,7 +80,15 @@ public final class PaperService {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             List<Object> transactions = Json.array(paper.get("transactions"));
-            if (transactions.size() >= 1000) throw new ApiException(400, "每篇论文最多记录 1000 笔收支");
+            Map<String, Object> tx = transaction(paper, input);
+            if (input.containsKey("confirmWriterPayment") && !Boolean.TRUE.equals(input.get("confirmWriterPayment"))) throw new ApiException(400, "请确认本次金额已实际支付");
+            if (Boolean.TRUE.equals(input.get("confirmWriterPayment"))) WriterPayments.validatePayment(paper, tx);
+            transactions.add(tx); touch(paper); return publicPaper(paper, true, state);
+        });
+    }
+
+    static Map<String, Object> transaction(Map<String, Object> paper, Map<String, Object> input) {
+            if (Json.array(paper.get("transactions")).size() >= 1000) throw new ApiException(400, "每篇论文最多记录 1000 笔收支");
             String type = text(input, "type", 40);
             if (!TYPES.contains(type)) throw new ApiException(400, "收支类型不正确");
             if (!BusinessService.hasWriting(paper) && Set.of("outgoing_deposit", "outgoing_balance").contains(type)) throw new ApiException(400, "半包论文没有写作稿酬，投稿等费用请登记为其他支出");
@@ -74,8 +100,7 @@ public final class PaperService {
             Map<String, Object> tx = new LinkedHashMap<>();
             tx.put("id", UUID.randomUUID().toString()); tx.put("type", type); tx.put("amountCents", cents); tx.put("date", date);
             tx.put("method", text(input, "method", 80)); tx.put("note", text(input, "note", 1000)); tx.put("createdAt", now());
-            transactions.add(tx); touch(paper); return publicPaper(paper, true, state);
-        });
+            return tx;
     }
 
     public Map<String, Object> deleteTransaction(String id, String transactionId, Map<String, Object> input) throws Exception {
@@ -92,7 +117,7 @@ public final class PaperService {
         if (previous != null) values.putAll(previous); values.putAll(input);
         values.putIfAbsent("status", "待投稿");
         Map<String, Object> result = new LinkedHashMap<>();
-        for (String field : FIELDS) result.put(field, field.endsWith("At") ? date(values, field) : text(values, field, field.equals("notes") ? 5000 : field.equals("title") ? 300 : 200));
+        for (String field : FIELDS) result.put(field, field.endsWith("At") ? date(values, field) : text(values, field, field.equals("notes") ? 5000 : field.equals("followUpReason") ? 1000 : field.equals("title") ? 300 : 200));
         if (Main.string(result, "title").isEmpty()) throw new ApiException(400, "请填写论文题目");
         if (!STATUSES.contains(Main.string(result, "status"))) throw new ApiException(400, "请选择有效的投稿状态");
         String email = Main.string(result, "boundEmail");
@@ -119,9 +144,18 @@ public final class PaperService {
         return result;
     }
 
+    private static void validateFollowUp(Map<String,Object> next,Map<String,Object> previous,Map<String,Object> input) {
+        if(Main.string(next,"followUpAt").isEmpty()||!Main.string(next,"followUpReason").isEmpty())return;
+        // Old records with only a date remain readable and unrelated partial updates stay compatible.
+        if(previous==null||input.containsKey("followUpReason")||!Main.string(previous,"followUpAt").equals(Main.string(next,"followUpAt")))
+            throw new ApiException(400,"请填写跟进事项，说明为什么跟进以及需要处理什么");
+    }
+
     static Map<String, Object> publicPaper(Map<String, Object> paper, boolean detail, Map<String, Object> state) {
         Map<String, Object> result = new LinkedHashMap<>(paper);
+        result.put("followUpReason",Main.string(paper,"followUpReason"));
         result.remove("submissionPassword"); result.put("hasPassword", !Main.string(paper, "submissionPassword").isEmpty());
+        result.put("files", new ArrayList<>(AttachmentService.files(paper)));
         if (!detail) result.remove("history");
         long received = 0, paid = 0, contractReceived = 0, writerPaid = 0;
         for (Object item : Json.array(paper.get("transactions"))) {

@@ -1,5 +1,6 @@
 """Back up the entire Paper Desk MySQL database together with its credential encryption key."""
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -22,7 +23,41 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def backup(database, defaults_file, key_file, output, mysqldump='mysqldump'):
+@contextlib.contextmanager
+def offline_guard(data_dir):
+    """Use the same OS file lock as Java: database rows and blobs must share one snapshot."""
+    lock_path = pathlib.Path(data_dir) / 'app.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a+b') as stream:
+        try:
+            stream.seek(0)
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError('Stop Paper Desk before a whole-database backup so manuscript files and database rows stay consistent.') from None
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.lockf(stream, fcntl.LOCK_UN)
+
+
+def backup(database, defaults_file, key_file, output, mysqldump='mysqldump', attachments_dir=None):
+    attachments = pathlib.Path(attachments_dir).resolve() if attachments_dir else pathlib.Path(key_file).resolve().parent / 'attachments'
+    if pathlib.Path(output).resolve().is_relative_to(attachments):
+        raise ValueError('The backup output must be outside the attachment directory.')
+    with offline_guard(attachments.parent):
+        return _backup(database, defaults_file, key_file, output, mysqldump, attachments)
+
+
+def _backup(database, defaults_file, key_file, output, mysqldump, attachments):
     if not re.fullmatch(r'[A-Za-z0-9_]{1,64}', database):
         raise ValueError('Database name must contain 1-64 letters, digits or underscores.')
     defaults_file, key_file, output = (pathlib.Path(p).resolve() for p in (defaults_file, key_file, output))
@@ -47,16 +82,28 @@ def backup(database, defaults_file, key_file, output, mysqldump='mysqldump'):
             raise RuntimeError('mysqldump failed (exit {}). Check the client options, database and permissions.'.format(result.returncode))
         if not (stage / 'database.sql').stat().st_size:
             raise RuntimeError('mysqldump produced an empty export; no backup was created.')
-        manifest = {'format': 'paper-desk-mysql-backup-v1', 'createdAt': stamp, 'database': database,
+        names = ['database.sql', 'database.key']
+        if attachments.exists():
+            for source in sorted(attachments.rglob('*')):
+                if source.is_symlink():
+                    raise ValueError('Attachment symlinks are not supported.')
+                relative = source.relative_to(attachments).as_posix()
+                name = 'attachments/' + relative
+                if source.is_file() and attachment_name(name):
+                    target = stage / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+                    names.append(name)
+        manifest = {'format': 'paper-desk-mysql-backup-v2', 'createdAt': stamp, 'database': database,
                     'scope': 'all-accounts-and-workspaces',
                     'files': {name: {'sha256': sha256(stage / name), 'bytes': (stage / name).stat().st_size}
-                              for name in ('database.sql', 'database.key')}}
+                              for name in names}}
         (stage / 'MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
         staged_archive = stage / 'backup.tar.gz'
         with staged_archive.open('xb') as stream:
             os.chmod(staged_archive, 0o600)
             with tarfile.open(fileobj=stream, mode='w:gz') as archive:
-                for name in ('database.sql', 'database.key', 'MANIFEST.json'):
+                for name in [*names, 'MANIFEST.json']:
                     path = stage / name
                     info = archive.gettarinfo(str(path), arcname=name)
                     info.uid = info.gid = 0
@@ -69,16 +116,22 @@ def backup(database, defaults_file, key_file, output, mysqldump='mysqldump'):
     return archive_path
 
 
+def attachment_name(name):
+    uuid = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    return bool(re.fullmatch(r'attachments/(?:' + uuid + r'/)?(?:files\.key|' + uuid + r'\.bin)', name))
+
+
 def verify_backup(path):
     with tarfile.open(path, 'r:gz') as archive:
         members = archive.getmembers()
-        if len(members) != 3 or {m.name for m in members} != {'database.sql', 'database.key', 'MANIFEST.json'} or any(not m.isfile() for m in members):
+        names = {m.name for m in members}
+        if len(names) != len(members) or not {'database.sql', 'database.key', 'MANIFEST.json'} <= names or any(not m.isfile() for m in members) or any(name not in {'database.sql', 'database.key', 'MANIFEST.json'} and not attachment_name(name) for name in names):
             raise ValueError('Unexpected backup entries; extraction is not safe.')
         with archive.extractfile('MANIFEST.json') as stream:
             manifest = json.load(stream)
-        if not isinstance(manifest, dict) or manifest.get('format') != 'paper-desk-mysql-backup-v1' or not isinstance(manifest.get('files'), dict) or set(manifest['files']) != {'database.sql', 'database.key'}:
+        if not isinstance(manifest, dict) or manifest.get('format') not in {'paper-desk-mysql-backup-v1', 'paper-desk-mysql-backup-v2'} or not isinstance(manifest.get('files'), dict) or set(manifest['files']) != names - {'MANIFEST.json'}:
             raise ValueError('Unsupported or incomplete backup manifest.')
-        for name in ('database.sql', 'database.key'):
+        for name in sorted(names - {'MANIFEST.json'}):
             if not isinstance(manifest['files'][name], dict):
                 raise ValueError('Invalid backup file metadata: ' + name)
             digest, size = hashlib.sha256(), 0
@@ -98,6 +151,7 @@ def main():
     parser.add_argument('--defaults-file', type=pathlib.Path,
                         help='Private MySQL [client] options file; passwords are never command-line arguments.')
     parser.add_argument('--key-file', type=pathlib.Path)
+    parser.add_argument('--attachments-dir', type=pathlib.Path, help='Defaults to attachments/ next to database.key. Stop the application before export.')
     parser.add_argument('--output', type=pathlib.Path)
     parser.add_argument('--mysqldump', default='mysqldump', help='Path to a MySQL 8.0+ mysqldump executable.')
     args = parser.parse_args()
@@ -108,7 +162,7 @@ def main():
             verify_backup(args.verify)
             print('Verified: ' + str(args.verify))
             return
-        path = backup(args.database, args.defaults_file, args.key_file, args.output, args.mysqldump)
+        path = backup(args.database, args.defaults_file, args.key_file, args.output, args.mysqldump, args.attachments_dir)
     except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
         parser.exit(1, 'Backup failed: {}\n'.format(error))
     print(path)
