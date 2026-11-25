@@ -1193,17 +1193,18 @@ test('long business forms show errors in their action footer and mark required f
  run("openEditor();");assert.match(nodes.get('#overlay-root').innerHTML,/name="title"[^>]*placeholder="填写客户提供的文章题目"/);
 });
 
-test('home exposes login, registration and password change without confusing registration with login',async()=>{
+test('home exposes only login and registration without confusing registration with login',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
- for(const label of ['登录','注册','修改密码'])assert.ok(nodes.get('#root').innerHTML.includes(`>${label}</button>`));
+ for(const label of ['登录','注册'])assert.ok(nodes.get('#root').innerHTML.includes(`>${label}</button>`));
+ assert.doesNotMatch(nodes.get('#root').innerHTML,/修改密码|data-mode="password"/);
  assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="login"/);
  await clickAction(handlers,{action:'auth-mode',mode:'login'});
  assert.match(nodes.get('#root').innerHTML,/data-mode="login"/);
  assert.ok(!nodes.get('#root').innerHTML.includes('name="confirm"'));
  assert.equal(run('state.initialized'),false);
  await clickAction(handlers,{action:'auth-mode',mode:'password'});
- for(const name of ['username','currentPassword','newPassword','confirm'])assert.ok(nodes.get('#root').innerHTML.includes(`name="${name}"`));
- assert.match(nodes.get('#root').innerHTML,/需要原密码/);
+ assert.equal(run('state.authMode'),'login');
+ assert.doesNotMatch(nodes.get('#root').innerHTML,/name="currentPassword"|name="newPassword"/);
  run("state.initialized=true;state.username='<script>';state.authMode='register';renderAuth()");
  assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="register"/);
  for(const name of ['username','password','confirm'])assert.ok(nodes.get('#root').innerHTML.includes(`name="${name}"`));
@@ -1218,7 +1219,7 @@ test('home exposes login, registration and password change without confusing reg
 
 test('home forms omit required badges and include a separate visibility control for each password',async()=>{
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));
- for(const [mode,names] of [['login',['password']],['register',['password','confirm']],['password',['currentPassword','newPassword','confirm']]]){
+ for(const [mode,names] of [['login',['password']],['register',['password','confirm']]]){
   run(`state.authMode=${JSON.stringify(mode)};renderAuth()`);
   const html=nodes.get('#root').innerHTML;
   assert.ok(!html.includes('required-mark'));assert.ok(!html.includes('form-guide'));assert.ok(!html.includes('标记项必须填写'));
@@ -1427,7 +1428,7 @@ test('home password visibility toggles each field independently while preserving
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
  run('globalThis.visibilityRequests=0;api=async()=>{visibilityRequests++;throw new Error("unexpected request")};');
  const form={id:'auth-form'},controls=new Map();
- for(const name of ['password','currentPassword','newPassword','confirm']){
+ for(const name of ['password','confirm']){
   const id='auth-'+name,input={type:'password',value:'Keep-entered-value-'+name,form,required:true,autocomplete:'new-password'};
   controls.set(id,input);nodes.set('#'+id,input);
  }
@@ -1475,26 +1476,19 @@ test('duplicate account errors retain the registration form so a different accou
  assert.equal(error.textContent,'');assert.equal(run('state.username'),'new-user');assert.equal(run('state.authenticated'),true);
 });
 
-test('home password change validates confirmation, retains errors and returns to login after success',async()=>{
+test('removed home password mode falls back to login and cannot submit password changes',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
  run("state.initialized=true;state.authMode='password';renderAuth();globalThis.calls=[];globalThis.messages=[];toast=message=>messages.push(message);api=async(url,options)=>{calls.push({url,data:JSON.parse(options.body)});return {ok:true};};");
- formValues(run,{username:'test-user',currentPassword:'Original-password',newPassword:'Changed-password',confirm:'Mismatch-password'});
+ assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="login"/);
+ assert.doesNotMatch(nodes.get('#root').innerHTML,/修改密码|name="currentPassword"|name="newPassword"/);
+ formValues(run,{username:'test-user',currentPassword:'Original-password',newPassword:'Changed-password',confirm:'Changed-password'});
  const {event,error,submit}=formEvent('auth-form','password');
  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
- assert.match(error.textContent,/两次输入的新密码不一致/);assert.equal(run('calls.length'),0);
+ assert.equal(error.textContent,'');assert.equal(run('calls.length'),0);
  assert.equal(submit.disabled,false);assert.equal(run('state.authSubmitting'),false);
- formValues(run,{username:'test-user',currentPassword:'Original-password',newPassword:'Changed-password',confirm:'Changed-password'});
- run("api=async()=>{throw new Error('账号或密码不正确');}");
- await Promise.all(handlers.get('submit').map(fn=>fn(event)));
- assert.match(error.textContent,/账号或密码不正确/);assert.equal(run('state.authMode'),'password');
- assert.match(nodes.get('#root').innerHTML,/name="currentPassword"/);
- run("api=async(url,options)=>{calls.push({url,data:JSON.parse(options.body)});return {ok:true};}");
- await Promise.all(handlers.get('submit').map(fn=>fn(event)));
- assert.equal(run('calls[0].url'),'/api/change-password');
- assert.equal(run('calls[0].data.currentPassword'),'Original-password');
- assert.equal(run('calls[0].data.newPassword'),'Changed-password');
- assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');assert.equal(run('state.authMode'),'login');
- assert.match(nodes.get('#root').innerHTML,/登录系统/);assert.match(run('messages.at(-1)'),/密码修改成功，请重新登录/);
+ assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');
+ assert.equal(run('messages.length'),0);
+ assert.match(nodes.get('#root').innerHTML,/登录系统/);
  assert.ok(!nodes.get('#root').innerHTML.includes('Changed-password'));
 });
 

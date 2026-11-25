@@ -74,13 +74,6 @@ public final class AccountRegistry {
         return store;
     }
 
-    public synchronized ApplicationStore changePassword(String username, String current, String next) throws Exception {
-        Vault.validatePassword(next);
-        ApplicationStore store = login(username, current);
-        store.changePassword(current, next);
-        return store;
-    }
-
     private void rememberPrimary() throws Exception {
         Files.writeString(data.resolve("primary-account.id"), accountId(primary.username()), StandardCharsets.US_ASCII);
     }

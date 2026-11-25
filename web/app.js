@@ -128,19 +128,19 @@ async function finishSave(saved,message,{customer=false,view=state.view,financeT
 
 function brand() { return `<div class="brand"><div class="brand-mark">${icon('document')}</div><div><div class="brand-name">知序</div><div class="brand-en">PAPER DESK</div></div></div>`; }
 function renderAuth() {
- const mode = state.authMode || 'login';
- const setup = mode==='register', changing = mode==='password';
- const title = changing ? '修改密码' : setup ? '注册账号' : '登录系统';
- const subtitle = changing ? '验证账号与原密码后，设置新的管理密码。' : setup ? '填写账号和密码，创建你的独立工作台。' : '输入账号与密码，继续处理你的投稿记录。';
+ const mode = state.authMode==='register' ? 'register' : 'login';
+ const setup = mode==='register';
+ const title = setup ? '注册账号' : '登录系统';
+ const subtitle = setup ? '填写账号和密码，创建你的独立工作台。' : '输入账号与密码，继续处理你的投稿记录。';
  const passwordNote = state.storage==='mysql' ? '管理密码用于登录和加密备份，投稿密码使用独立密钥加密。请妥善保管管理密码、加密密钥和备份。系统没有预设账号或默认密码。' : '管理密码同时用于加密本地数据，请妥善保管。忘记密码将无法恢复数据，系统没有预设账号或默认密码。';
- const passwordField = (name,label,fresh=false) => `<div class="field"><label for="auth-${name}">${label}</label><div class="auth-password-input"><input id="auth-${name}" name="${name}" type="password" required minlength="${fresh?10:1}" maxlength="128" autocomplete="${fresh?'new-password':'current-password'}" placeholder="${fresh?'10–128 个字符':changing?'请输入原密码':'请输入管理密码'}"><button type="button" class="auth-password-toggle" data-action="toggle-auth-password" data-target="auth-${name}" data-label="${label}" aria-controls="auth-${name}" aria-label="显示${label}" aria-pressed="false" title="显示${label}">${icon('eye')}</button></div></div>`;
+ const passwordField = (name,label,fresh=false) => `<div class="field"><label for="auth-${name}">${label}</label><div class="auth-password-input"><input id="auth-${name}" name="${name}" type="password" required minlength="${fresh?10:1}" maxlength="128" autocomplete="${fresh?'new-password':'current-password'}" placeholder="${fresh?'10–128 个字符':'请输入管理密码'}"><button type="button" class="auth-password-toggle" data-action="toggle-auth-password" data-target="auth-${name}" data-label="${label}" aria-controls="auth-${name}" aria-label="显示${label}" aria-pressed="false" title="显示${label}">${icon('eye')}</button></div></div>`;
  const form = `<form id="auth-form" novalidate data-mode="${mode}">
   <div class="field"><label for="auth-username">登录账号</label><input id="auth-username" name="username" type="text" required minlength="3" maxlength="64" ${setup?'pattern="[A-Za-z0-9][A-Za-z0-9_.@+\\-]{2,63}" title="3–64 个字符，以字母或数字开头，支持字母、数字、下划线、点、@、加号和减号"':''} autocomplete="username" placeholder="请输入登录账号" value="${esc(state.username)}" autofocus>${setup?'<small>3–64 个字符，以字母或数字开头，支持 _ . @ + -</small>':''}</div>
-  ${changing ? passwordField('currentPassword','原密码')+passwordField('newPassword','新密码',true) : passwordField('password',setup?'设置管理密码':'管理密码',setup)}
-  ${setup||changing ? passwordField('confirm',changing?'确认新密码':'确认密码',true) : ''}
-  ${setup?'<small>每个账号拥有独立的客户、论文与收支记录。账号名是否可用将在提交后校验。</small>':''}<div class="error-message" id="auth-error" role="alert"></div><button class="btn primary" type="submit">${changing?'确认修改密码':setup?'注册并创建工作台':'登录工作台'}${icon('chevron')}</button>
+  ${passwordField('password',setup?'设置管理密码':'管理密码',setup)}
+  ${setup ? passwordField('confirm','确认密码',true) : ''}
+  ${setup?'<small>每个账号拥有独立的客户、论文与收支记录。账号名是否可用将在提交后校验。</small>':''}<div class="error-message" id="auth-error" role="alert"></div><button class="btn primary" type="submit">${setup?'注册并创建工作台':'登录工作台'}${icon('chevron')}</button>
  </form>`;
- $('#root').innerHTML = `<div class="auth-layout"><aside class="auth-brand-panel">${brand()}<div class="auth-intro"><div class="eyebrow">A CLEARER WAY TO MANAGE</div><h1>每一次投稿，<br>都井然有序。</h1><p>从论文档案到投稿进度，从定金到尾款，<br>让每一笔记录、每一个节点，都清晰可循。</p><div class="auth-art" aria-hidden="true"><div class="art-head"><span class="art-dot"></span>我的投稿工作台</div><div class="art-row"></div><div class="art-row"></div><div class="art-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="auth-bottom">${icon('shield')}${state.storage==='mysql'?'数据库保存 · 投稿密码加密 · 专注管理':'本地保存 · 加密保护 · 专注管理'}</div></aside><main class="auth-form-panel"><div class="auth-form-wrap"><div class="eyebrow">YOUR PERSONAL WORKSPACE</div><nav class="auth-nav" aria-label="账号功能">${[['login','登录'],['register','注册'],['password','修改密码']].map(([id,label])=>`<button type="button" class="tab ${mode===id?'active':''}" data-action="auth-mode" data-mode="${id}" ${mode===id?'aria-current="page"':''}>${label}</button>`).join('')}</nav><h2>${title}</h2><p class="subtitle">${subtitle}</p>${form}<div class="auth-note">${icon('lock')}<span>${changing?'修改密码需要原密码，无法用于找回忘记的密码。修改成功后，此账号的所有页面需重新登录，旧备份仍使用备份时的密码。':setup?passwordNote:'登录有效期为 8 小时，离开时可点击左下角退出，锁定访问。'}</span></div></div></main></div>`;
+ $('#root').innerHTML = `<div class="auth-layout"><aside class="auth-brand-panel">${brand()}<div class="auth-intro"><div class="eyebrow">A CLEARER WAY TO MANAGE</div><h1>每一次投稿，<br>都井然有序。</h1><p>从论文档案到投稿进度，从定金到尾款，<br>让每一笔记录、每一个节点，都清晰可循。</p><div class="auth-art" aria-hidden="true"><div class="art-head"><span class="art-dot"></span>我的投稿工作台</div><div class="art-row"></div><div class="art-row"></div><div class="art-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="auth-bottom">${icon('shield')}${state.storage==='mysql'?'数据库保存 · 投稿密码加密 · 专注管理':'本地保存 · 加密保护 · 专注管理'}</div></aside><main class="auth-form-panel"><div class="auth-form-wrap"><div class="eyebrow">YOUR PERSONAL WORKSPACE</div><nav class="auth-nav" aria-label="账号功能">${[['login','登录'],['register','注册']].map(([id,label])=>`<button type="button" class="tab ${mode===id?'active':''}" data-action="auth-mode" data-mode="${id}" ${mode===id?'aria-current="page"':''}>${label}</button>`).join('')}</nav><h2>${title}</h2><p class="subtitle">${subtitle}</p>${form}<div class="auth-note">${icon('lock')}<span>${setup?passwordNote:'登录有效期为 8 小时，离开时可点击左下角退出，锁定访问。'}</span></div></div></main></div>`;
  prepareForms($('#root'));
 }
 
@@ -457,7 +457,7 @@ function validateForm(form) {
   if(value('status')==='已发表'&&start&&published&&published<start)add('publishedAt','发表日期不能早于实际投稿日期');
   if(value('status')==='已发表'&&end&&published&&published<end)add('publishedAt','发表日期不能早于结束日期');
  }
- if(value('confirm')&&(form.id==='password-form'||form.dataset?.mode==='password')&&value('confirm')!==value('newPassword'))add('confirm','两次输入的新密码不一致');
+ if(value('confirm')&&form.id==='password-form'&&value('confirm')!==value('newPassword'))add('confirm','两次输入的新密码不一致');
  if(value('confirm')&&form.dataset?.mode==='register'&&value('confirm')!==value('password'))add('confirm','两次输入的密码不一致');
  if(!issues.length)return true;
  for(const issue of issues)fieldError(issue.control,issue.message);
@@ -588,11 +588,11 @@ document.addEventListener('click', async event => {
  if(fileTransferBusy){toast('文件正在传输，请等待完成。',true);return;}
  try {
   if(action==='auth-mode') {
-   if(state.authSubmitting||!['login','register','password'].includes(button.dataset.mode))return;
+   if(state.authSubmitting||!['login','register'].includes(button.dataset.mode))return;
    state.username=$('#auth-username')?.value.trim()||state.username;state.authMode=button.dataset.mode;renderAuth();$('#auth-username')?.focus();
   }
   else if(action==='toggle-auth-password') {
-   if(!['auth-password','auth-currentPassword','auth-newPassword','auth-confirm'].includes(button.dataset.target))return;
+   if(!['auth-password','auth-confirm'].includes(button.dataset.target))return;
    const input=$('#'+button.dataset.target);
    if(input?.form?.id!=='auth-form'||!['password','text'].includes(input.type))return;
    const visible=input.type==='password';input.type=visible?'text':'password';
@@ -709,17 +709,13 @@ document.addEventListener('submit',async event=>{
   const data=Object.fromEntries(new FormData(form));
   if(form.id==='auth-form') {
    state.authSubmitting=true;
-   const mode=form.dataset.mode;state.username=data.username.trim();
-   if(mode==='password') {
-    if(data.newPassword!==data.confirm)throw new Error('两次输入的新密码不一致');
-    await request('POST','/api/change-password',{username:data.username,currentPassword:data.currentPassword,newPassword:data.newPassword});
-    state.authenticated=false;state.csrf='';state.papers=[];state.customers=[];state.initialized=true;state.authMode='login';closeOverlay();renderAuth();toast('密码修改成功，请重新登录');
-   } else {
-    if(mode==='register'&&data.password!==data.confirm)throw new Error('两次输入的密码不一致');
-    const result=await request('POST',mode==='register'?'/api/register':'/api/login',{username:data.username,password:data.password});
-    state.csrf=result.csrf;state.username=result.username;state.initialized=true;state.authenticated=true;state.authMode='login';state.view='records';resetFilters();renderShell();
-    try { await loadPapers(); } catch(error) { if(state.authenticated)toast('登录成功，列表加载失败，请点击刷新。',true); }
-   }
+   const mode=form.dataset.mode;
+   if(!['login','register'].includes(mode))return;
+   state.username=data.username.trim();
+   if(mode==='register'&&data.password!==data.confirm)throw new Error('两次输入的密码不一致');
+   const result=await request('POST',mode==='register'?'/api/register':'/api/login',{username:data.username,password:data.password});
+   state.csrf=result.csrf;state.username=result.username;state.initialized=true;state.authenticated=true;state.authMode='login';state.view='records';resetFilters();renderShell();
+   try { await loadPapers(); } catch(error) { if(state.authenticated)toast('登录成功，列表加载失败，请点击刷新。',true); }
   }
   else if(form.id==='followup-form')await saveFollowUpForm(form,data,origin);
   else if(form.id==='paper-form') {

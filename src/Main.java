@@ -115,19 +115,6 @@ public class Main {
                 }
                 return;
             }
-            if (path.equals("/api/change-password") && method.equals("POST")) {
-                throttle(ex);
-                Map<String, Object> credentials = body(ex);
-                synchronized (accounts) {
-                    Session current = session(ex);
-                    ApplicationStore store = accounts.changePassword(string(credentials, "username"), string(credentials, "currentPassword"), string(credentials, "newPassword"));
-                    invalidateSessions(store);
-                    attempts.remove(ex.getRemoteAddress().getAddress().getHostAddress());
-                    if (current == null || current.store() == store) ex.getResponseHeaders().set("Set-Cookie", "paper_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
-                    json(ex, 200, Map.of("ok", true));
-                }
-                return;
-            }
             Session session = session(ex);
             if (session == null) throw new ApiException(401, "登录已失效，请重新登录");
             if (mutation && !session.csrf().equals(ex.getRequestHeaders().getFirst("X-CSRF-Token"))) throw new ApiException(403, "请求校验失败，请刷新页面");

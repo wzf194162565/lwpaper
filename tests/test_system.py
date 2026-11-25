@@ -112,50 +112,38 @@ class SystemTest(ApiTestCase):
         self.assertEqual('test-user', self.call('GET', '/api/session')['username'])
         self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
 
-    def test_home_password_change_verifies_credentials_and_invalidates_sessions(self):
+    def test_home_password_change_is_unavailable_and_preserves_credentials(self):
         self.setup_account()
         paper = self.create()
-        error = self.call('POST', '/api/password', {'currentPassword': 'wrong-password', 'newPassword': 'Changed-password-2026'}, expected=401)
-        self.assertTrue(error['authenticated'])
+        payload = {'username': 'test-user', 'currentPassword': 'Test-password-2026',
+                   'newPassword': 'Changed-password-2026'}
         original_client, original_csrf = self.client, self.csrf
-        self.reset_client()
-        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
-        second_client, second_csrf = self.client, self.csrf
+        self.call('POST', '/api/change-password', payload, expected=404)
+        self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
         self.reset_client()
         self.csrf = ''
-        payload = {'username': 'test-user', 'currentPassword': 'Test-password-2026', 'newPassword': 'Changed-password-2026'}
-        self.call('POST', '/api/change-password', {**payload, 'username': 'wrong-user'}, expected=401)
-        self.call('POST', '/api/change-password', {**payload, 'currentPassword': 'wrong-password'}, expected=401)
-        self.call('POST', '/api/change-password', {**payload, 'newPassword': 'short'}, expected=400)
-        self.call('POST', '/api/change-password', payload, expected=403, headers={'Origin': 'https://evil.example'})
-        anonymous_client = self.client
+        self.call('POST', '/api/change-password', payload, expected=401)
+        self.call('POST', '/api/password', payload, expected=401)
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
         self.client, self.csrf = original_client, original_csrf
-        self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
-        self.client, self.csrf = anonymous_client, ''
-        self.call('POST', '/api/change-password', payload)
-        self.assertFalse(self.call('GET', '/api/session')['authenticated'])
-        for client, csrf in [(original_client, original_csrf), (second_client, second_csrf)]:
-            self.client, self.csrf = client, csrf
-            self.call('GET', '/api/papers', expected=401)
-        self.client, self.csrf = anonymous_client, ''
-        self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'}, expected=401)
-        self.process.terminate()
-        self.process.wait(timeout=10)
-        self.start_server()
-        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': payload['newPassword']})['csrf']
-        self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
-        self.assertEqual('private-secret-42', self.call('POST', f"/api/papers/{paper['id']}/credentials")['password'])
+        self.assertTrue(self.call('GET', '/api/session')['authenticated'])
 
-    def test_home_password_change_and_login_share_rate_limit(self):
+    def test_password_change_and_login_share_rate_limit(self):
         self.setup_account()
-        self.call('POST', '/api/logout')
+        original_client, original_csrf = self.client, self.csrf
         for _ in range(3):
-            self.call('POST', '/api/change-password', {'username': 'test-user', 'currentPassword': 'wrong-password',
-                                                     'newPassword': 'Changed-password-2026'}, expected=401)
+            error = self.call('POST', '/api/password', {'currentPassword': 'wrong-password',
+                                                      'newPassword': 'Changed-password-2026'}, expected=401)
+            self.assertTrue(error['authenticated'])
+        self.reset_client()
+        self.csrf = ''
         for _ in range(2):
             self.call('POST', '/api/login', {'username': 'test-user', 'password': 'wrong-password'}, expected=401)
-        self.call('POST', '/api/change-password', {'username': 'test-user', 'currentPassword': 'Test-password-2026',
-                                                 'newPassword': 'Changed-password-2026'}, expected=429)
+        self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'}, expected=429)
+        self.client, self.csrf = original_client, original_csrf
+        self.call('POST', '/api/password', {'currentPassword': 'Test-password-2026',
+                                          'newPassword': 'Changed-password-2026'}, expected=429)
 
     def test_accounts_have_independent_data_and_survive_switching_and_restart(self):
         self.setup_account()
@@ -210,19 +198,21 @@ class SystemTest(ApiTestCase):
         self.setup_account()
         first_client, first_csrf = self.client, self.csrf
         self.reset_client()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        stale_client, stale_csrf = self.client, self.csrf
+        self.reset_client()
         self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
-        second = self.create(title='第二个账号仍可使用')
-        # A public password change for account A must preserve the caller's account B cookie.
-        self.call('POST', '/api/change-password', {'username': 'test-user', 'currentPassword': 'Test-password-2026',
-                                                 'newPassword': 'Changed-password-2026'})
-        self.assertEqual('second-user', self.call('GET', '/api/session')['username'])
-        self.assertEqual(second['id'], self.call('GET', '/api/papers')[0]['id'])
+        second = self.create(title='Account B remains accessible')
         second_client, second_csrf = self.client, self.csrf
         self.client, self.csrf = first_client, first_csrf
-        self.call('GET', '/api/papers', expected=401)
-        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Changed-password-2026'})['csrf']
+        self.csrf = self.call('POST', '/api/password', {'currentPassword': 'Test-password-2026',
+                                                       'newPassword': 'Changed-password-2026'})['csrf']
         first_client, first_csrf = self.client, self.csrf
+        self.client, self.csrf = stale_client, stale_csrf
+        self.call('GET', '/api/papers', expected=401)
         self.client, self.csrf = second_client, second_csrf
+        self.assertEqual('second-user', self.call('GET', '/api/session')['username'])
+        self.assertEqual(second['id'], self.call('GET', '/api/papers')[0]['id'])
         result = self.call('POST', '/api/password', {'currentPassword': 'Second-password-2026', 'newPassword': 'Second-changed-password'})
         self.csrf = result['csrf']
         self.assertEqual(second['id'], self.call('GET', '/api/papers')[0]['id'])
