@@ -13,10 +13,11 @@ const statusColors = {'草稿':'slate','待投稿':'slate','已投稿':'blue','�
 const terminal = p => serviceEnded(p)||['已发表','已撤稿'].includes(p.status);
 const accepted = p => p.status==='已录用';
 const published = p => p.status==='已发表';
-const hasFollowUp = p => Boolean(p.followUpAt)&&!terminal(p);
+const paperInProgress = p => !terminal(p)&&!accepted(p);
+const hasFollowUp = p => p.followUpTask?followUpActive(p.followUpTask):paperFollowUps(p).some(followUpActive);
 const due = p => hasFollowUp(p)&&p.followUpAt<=today();
 function followUpPlans() {
- return state.papers.filter(hasFollowUp).sort((a,b)=>a.followUpAt.localeCompare(b.followUpAt)||String(a.code||a.id).localeCompare(String(b.code||b.id)));
+ return allFollowUps().filter(p=>followUpActive(p.followUpTask));
 }
 function followUpReasonLabel(p) { return p.followUpReason?.trim()||(p.followUpAt?'待补充跟进事项':'未安排跟进事项'); }
 function followUpLabel(p) {
@@ -70,7 +71,10 @@ const icons = {
 };
 function icon(name) { return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.document}</svg>`; }
 function badge(status) { return `<span class="badge ${statusColors[status] || 'slate'}">${esc(status)}</span>`; }
-function btn(action, label, glyph, classes='', extra='') { return `<button type="button" class="btn ${classes}" data-action="${action}" ${extra}>${glyph ? icon(glyph) : ''}${label}</button>`; }
+function btn(action, label, glyph, classes='', extra='') {
+ const variants=classes.split(/\s+/),inline=variants.includes('small')&&!variants.includes('primary');
+ return `<button type="button" class="${inline?'text-btn':'btn'} ${classes}" data-action="${action}" ${extra}>${glyph ? icon(glyph) : ''}${label}</button>`;
+}
 function toast(message, error=false) {
  const node = document.createElement('div'); node.className = `toast${error ? ' error' : ''}`;
  node.innerHTML = `${icon(error ? 'info' : 'checkCircle')}<span>${esc(message)}</span>`;
@@ -148,9 +152,18 @@ function renderShell() {
 
 function pageHeading(title, subtitle, actions='') { return `<div class="page-heading"><div><div class="eyebrow">PAPER MANAGEMENT WORKSPACE</div><h1>${title}</h1><p class="subtitle">${subtitle}</p></div><div class="actions">${actions}</div></div>`; }
 function stat(label, value, glyph, foot, color='', unit='', isMoney=false) { return `<div class="stat-card"><div class="stat-label">${label}<span class="stat-symbol ${color}">${icon(glyph)}</span></div><div class="stat-value ${isMoney ? 'money' : ''}">${value}${unit ? `<span class="unit">${unit}</span>` : ''}</div><div class="stat-foot">${foot}</div></div>`; }
+function overviewExpenseBreakdown(papers) {
+ const totals={publication:0,writing:0};
+ for(const p of papers)for(const tx of p.transactions||[]){
+  const amount=transactionAmount(tx);
+  if(tx.type==='outgoing_publication')totals.publication+=amount;
+  else if(['outgoing_deposit','outgoing_balance','outgoing_settlement'].includes(tx.type))totals.writing+=amount;
+ }
+ return `<div class="expense-breakdown"><span>版面费支出 <strong>${yuan(totals.publication)}</strong></span><span>写作费支出 <strong>${yuan(totals.writing)}</strong></span></div>`;
+}
 function stats() {
  const p = state.papers;
- return `<div class="stats-grid">${stat('论文总数',p.length,'document',`<strong>${p.filter(x=>!terminal(x)).length} 篇</strong> 正在跟进 · 关联作者 <strong>${linkedAuthors(p).length} 位</strong>`,'','篇')}${stat('已录用 / 已发表',p.filter(x=>accepted(x)||published(x)).length,'checkCircle',`已发表 <strong>${p.filter(published).length} 篇</strong>`,'blue','篇')}${stat('累计已收款',yuan(sum(p,'receivedCents')),'wallet',`待收款 <strong>${yuan(sum(p,'receivableCents'))}</strong>`,'gold','',true)}${stat('累计已付款',yuan(sum(p,'paidCents')),'arrowUp',`待付稿酬 <strong>${yuan(sum(p,'payableCents'))}</strong>`,'purple','',true)}</div>`;
+ return `<div class="stats-grid">${stat('论文总数',p.length,'document',`<strong>${p.filter(paperInProgress).length} 篇</strong> 正在跟进 · 关联作者 <strong>${linkedAuthors(p).length} 位</strong>`,'','篇')}${stat('已录用 / 已发表',p.filter(x=>accepted(x)||published(x)).length,'checkCircle',`已发表 <strong>${p.filter(published).length} 篇</strong>`,'blue','篇')}${stat('累计已收款',yuan(sum(p,'receivedCents')),'wallet',`待收款 <strong>${yuan(sum(p,'receivableCents'))}</strong>`,'gold','',true)}${stat('累计已付款',yuan(sum(p,'paidCents')),'arrowUp',overviewExpenseBreakdown(p),'purple','',true)}</div>`;
 }
 function followUpStats() {
  const plans=followUpPlans(),overdue=plans.filter(p=>p.followUpAt<today()).length,todayCount=plans.filter(p=>p.followUpAt===today()).length;
@@ -158,21 +171,23 @@ function followUpStats() {
 }
 function footer() { return `<footer class="footer-note"><span>${icon('shield')}${state.storage==='mysql'?'数据保存在 MySQL · 投稿密码默认隐藏':'数据保存在本机 · 密码默认隐藏'}</span><span>知序 PAPER DESK &nbsp; / &nbsp; 让每一次投稿都有迹可循</span></footer>`; }
 function renderContent() {
+ if(state.view==='followups')return renderFollowUps();
  if(state.view==='papers')return renderPaperManagement();
  if(state.view==='submissions')return renderSubmissions();
  if(state.view==='customers')return renderCustomers();
  if (state.view === 'settings') return renderSettings();
  if (state.view === 'finance') return renderFinance();
  const followups = state.view === 'followups';
- const tabs = followups ? [['all','全部计划',followUpPlans().length],['due','到期待跟进',state.papers.filter(due).length],['upcoming','未来 7 天',upcoming().length]] : [['all','全部记录',state.papers.length],['active','进行中',state.papers.filter(p=>!terminal(p)).length],['due','到期待跟进',state.papers.filter(due).length],['accepted','已录用',state.papers.filter(accepted).length],['published','已发表',state.papers.filter(published).length],['finished','已归档',state.papers.filter(terminal).length]];
- $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down')+(followups?'':btn('navigate','查看论文管理','document','','data-view="papers"')))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用仍属于“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
+ const tabs = followups ? [['all','全部计划',followUpPlans().length],['due','到期待跟进',state.papers.filter(due).length],['upcoming','未来 7 天',upcoming().length]] : [['all','全部记录',state.papers.length],['active','进行中',state.papers.filter(paperInProgress).length],['due','到期待跟进',state.papers.filter(due).length],['accepted','已录用',state.papers.filter(accepted).length],['published','已发表',state.papers.filter(published).length],['finished','已归档',state.papers.filter(terminal).length]];
+ $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down')+(followups?'':btn('navigate','查看论文管理','document','','data-view="papers"')))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用单独归入“已录用”，不计入“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
  renderPaperResults();
 }
 function upcoming() { const end = new Date(); end.setDate(end.getDate()+7); const day = `${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`; return followUpPlans().filter(p=>p.followUpAt>today()&&p.followUpAt<=day); }
 function filteredPapers() {
+ if(state.view==='followups')return filteredFollowUps();
  const source=state.view==='followups'?followUpPlans():state.papers;
  const papers = source.filter(p => {
-  if (state.tab === 'active' && terminal(p)) return false;
+  if (state.tab === 'active' && !paperInProgress(p)) return false;
   if (state.tab === 'finished' && !terminal(p)) return false;
   if (state.tab === 'accepted' && !accepted(p)) return false;
   if (state.tab === 'published' && !published(p)) return false;
@@ -209,9 +224,10 @@ function sequenceBadge(index) {
  return `<span class="record-sequence" aria-label="序号 ${index+1}">${index+1}</span>`;
 }
 function renderPaperResults() {
+ if(state.view==='followups')return renderFollowUpResults();
  const papers = filteredPapers(); const paging = pagination(papers.length); const visible = papers.slice((state.page-1)*state.pageSize,state.page*state.pageSize);
  if (state.from && state.to && state.from > state.to) { $('#results').innerHTML = '<div class="empty-state"><h3>起始日期不能晚于截止日期</h3><p>调整投稿日期范围后重新查询。</p></div>'; return; }
- $('#results').innerHTML = papers.length ? `<div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>论文题目 / 编号</th><th>客户 / 作者</th><th>投稿期刊</th><th>投稿日期</th><th>投稿状态</th><th>收款 / 应收</th><th>已付 / 稿酬</th><th>${state.view==='followups'?'跟进日期 / 事项':'操作'}</th></tr></thead><tbody>${visible.map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="paper-meta">${esc(p.code)}</div><div class="cell-sub">${serviceBadge(p)}</div>${manuscriptShortcut(p)}</td><td>${customerLink(p)}<div class="cell-sub">${esc(p.authors||'未填写作者')}</div></td><td><div class="journal-name" title="${esc(p.journal)}">${esc(p.journal||'待选择期刊')}</div><div class="cell-sub">${esc(p.submissionSystem||'—')}</div></td><td>${dateLabel(p.submittedAt)}${due(p)?`<div class="cell-sub due-date">${icon('clock')}需要跟进</div>`:''}</td><td>${badge(p.status)}</td><td><div class="cell-money">${yuan(p.contractReceivedCents)}</div><div class="cell-sub">应收 ${yuan(p.contractCents)}</div></td><td>${hasWriting(p)?`<div class="cell-money light">${yuan(p.writerPaidCents)}</div><div class="cell-sub">稿酬 ${yuan(p.writerFeeCents)}</div>`:'<span class="panel-hint">客户供稿</span>'}</td><td>${state.view==='followups'?`<div class="${due(p)?'due-date':''}">${dateLabel(p.followUpAt)}</div><div class="cell-sub follow-up-reason">${esc(followUpReasonLabel(p))}</div><button class="text-btn" data-action="detail" data-id="${esc(p.id)}">详情</button>`:`<button class="text-btn" data-action="detail" data-id="${esc(p.id)}">详情${icon('chevron')}</button>`}</td></tr>`).join('')}</tbody></table></div>${paging}` : emptyState(state.papers.length>0);
+ $('#results').innerHTML = papers.length ? `<div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>论文题目 / 编号</th><th>客户 / 作者</th><th>投稿期刊</th><th>投稿日期</th><th>投稿状态</th><th>收款 / 应收</th><th>已付 / 稿酬</th>${state.view==='followups'?'<th>跟进日期 / 事项</th>':''}<th>操作</th></tr></thead><tbody>${visible.map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="paper-meta">${esc(p.code)}</div><div class="cell-sub">${serviceBadge(p)}</div>${manuscriptShortcut(p)}</td><td>${customerLink(p)}<div class="cell-sub">${esc(p.authors||'未填写作者')}</div></td><td><div class="journal-name" title="${esc(p.journal)}">${esc(p.journal||'待选择期刊')}</div><div class="cell-sub">${esc(p.submissionSystem||'—')}</div></td><td>${dateLabel(p.submittedAt)}${due(p)?`<div class="cell-sub due-date">${icon('clock')}需要跟进</div>`:''}</td><td>${badge(p.status)}</td><td><div class="cell-money">${yuan(p.contractReceivedCents)}</div><div class="cell-sub">应收 ${yuan(p.contractCents)}</div></td><td>${hasWriting(p)?`<div class="cell-money light">${yuan(p.writerPaidCents)}</div><div class="cell-sub">稿酬 ${yuan(p.writerFeeCents)}</div>`:'<span class="panel-hint">客户供稿</span>'}</td><td>${state.view==='followups'?`<div class="${due(p)?'due-date':''}">${dateLabel(p.followUpAt)}</div><div class="cell-sub follow-up-reason">${esc(followUpReasonLabel(p))}</div></td><td>`:''}<button class="text-btn" data-action="detail" data-id="${esc(p.id)}">${icon('eye')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}` : emptyState(state.papers.length>0);
 }
 function overviewPanels() {
  const p = state.papers; const groups = [['准备中',p.filter(x=>['草稿','待投稿'].includes(x.status)).length],['投稿 / 审稿',p.filter(x=>['已投稿','审稿中'].includes(x.status)).length],['修改中',p.filter(x=>x.status==='修改中').length],['录用 / 发表',p.filter(x=>['已录用','已发表'].includes(x.status)).length]];
@@ -268,7 +284,7 @@ function financeAnnualPanel(report) {
    ${stat('当前待收服务费',yuan(report.receivable),'clock',`<span>${cohort}</span>${sourceLink('balances','查看应收应付')}`,'blue','',true)}
    ${stat('当前待付费用',yuan(report.writerPayable+report.publicationPayable),'wallet',`<span>稿酬 ${yuan(report.writerPayable)} · 版面费 ${yuan(report.publicationPayable)}</span>${sourceLink('balances','查看应收应付')}`,'gold','',true)}
    ${stat('净利润（已结清）',yuan(report.settledProfit),'chart',`<span>${report.settledPapers.length} 篇 · ${report.basis==='settled'?'按最后收付 / 终止结算日期':'按论文建档日期'}</span>${sourceLink('profits','查看利润明细')}`,'','',true)}
-   ${stat('净现金流',yuan(report.cashNet),'chart',`<span>本期实际收款 − 实际付款</span>${sourceLink('all','查看收付明细')}`,'purple','',true)}
+   ${stat('净利润',yuan(report.cashNet),'chart',`<span>本期实际收款 − 实际付款</span>${sourceLink('all','查看收付明细')}`,'purple','',true)}
   </div>
   <div class="annual-estimate"><span>${cohort} · 预计净利润 <strong>${report.unknownCount?'部分待核算':yuan(report.profit)}</strong>${report.unknownCount?`（已确认部分 ${yuan(report.profit)}，${report.unknownCount} 篇版面费待确认）`:''}</span><span>待退款 ${yuan(report.refundable)} · 待追回稿酬 ${yuan(report.recoverable)} · 待退回版面费 ${yuan(report.publicationRefundable)}</span></div>
   <p class="annual-summary-note">收付款按实际发生年份统计，包含跨年论文的本期流水。待收、待付和预计利润为所选年份建档论文的当前金额；净利润只计已结清论文，结清年度按最后一笔实际收付或终止结算日期确定。报表随当前记录更新。</p>
@@ -303,12 +319,12 @@ function renderFinance() {
 function renderFinanceBalances() {
  const papers=filteredFinancePapers();const paging=pagination(papers.length);
  if(!papers.length){$('#results').innerHTML=emptyState(state.papers.length>0);return;}
- $('#results').innerHTML=`<div class="results-note">当前筛选：约定应收 ${yuan(papers.reduce((n,p)=>n+effectiveContract(p),0))} · 已收定金及尾款 ${yuan(sum(papers,'contractReceivedCents'))} · 待收款 ${yuan(sum(papers,'receivableCents'))}<br>约定稿酬 ${yuan(papers.reduce((n,p)=>n+effectiveWriterFee(p),0))} · 已付稿酬 ${yuan(sum(papers,'writerPaidCents'))} · 待付稿酬 ${yuan(sum(papers,'payableCents'))}</div><div class="table-scroll"><table class="finance-balances"><thead><tr><th class="sequence-cell" scope="col">序号</th><th>关联论文</th><th>客户 / 写作者</th><th>约定应收 / 已收定金尾款</th><th>待收款</th><th>约定稿酬 / 已付稿酬</th><th>待付稿酬</th><th>版面费 / 预计利润</th><th>操作</th></tr></thead><tbody>${papers.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="paper-meta">${esc(p.code)}</div><div class="cell-sub">${serviceBadge(p)}</div></td><td><div>客户：${esc(p.customer||'未填写')}</div><div class="cell-sub">${hasWriting(p)?`写作者：${esc(p.writer||'未填写')}`:'客户供稿 · 无写作稿酬'}</div></td><td><div class="cell-money">约定 ${yuan(effectiveContract(p))}</div><div class="cell-sub">已收 ${yuan(p.contractReceivedCents)}</div>${!serviceEnded(p)&&p.contractReceivedCents>p.contractCents?'<div class="cell-sub">已收超过约定，请核对</div>':''}</td><td class="cell-money">${yuan(p.receivableCents)}${p.refundableCents?`<div class="cell-sub">待退款 ${yuan(p.refundableCents)}</div>`:''}</td><td>${hasWriting(p)?`<div class="cell-money">约定 ${yuan(effectiveWriterFee(p))}</div><div class="cell-sub">已付 ${yuan(p.writerPaidCents)}</div>${!serviceEnded(p)&&p.writerPaidCents>p.writerFeeCents?'<div class="cell-sub">已付超过约定，请核对</div>':''}`:'<span class="panel-hint">无需写作稿酬</span>'}</td><td class="cell-money">${yuan(p.payableCents)}${p.recoverableCents?`<div class="cell-sub">待追回 ${yuan(p.recoverableCents)}</div>`:''}</td><td><div>${publicationFeeLabels[publicationMode(p)]}</div>${publicationMode(p)==='included'?`<div class="cell-sub">成本 ${yuan(p.publicationFeeCents)} · 待付 ${yuan(p.publicationPayableCents)}</div>`:''}${p.publicationRefundableCents?`<div class="cell-sub">待退回 ${yuan(p.publicationRefundableCents)}</div>`:''}<div class="cell-sub">预计利润 ${p.profitEstimateKnown?yuan(p.estimatedProfitCents):'待核算'}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">详情${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
+ $('#results').innerHTML=`<div class="results-note">当前筛选：约定应收 ${yuan(papers.reduce((n,p)=>n+effectiveContract(p),0))} · 已收定金及尾款 ${yuan(sum(papers,'contractReceivedCents'))} · 待收款 ${yuan(sum(papers,'receivableCents'))}<br>约定稿酬 ${yuan(papers.reduce((n,p)=>n+effectiveWriterFee(p),0))} · 已付稿酬 ${yuan(sum(papers,'writerPaidCents'))} · 待付稿酬 ${yuan(sum(papers,'payableCents'))}</div><div class="table-scroll"><table class="finance-balances"><thead><tr><th class="sequence-cell" scope="col">序号</th><th>关联论文</th><th>客户 / 写作者</th><th>约定应收 / 已收定金尾款</th><th>待收款</th><th>约定稿酬 / 已付稿酬</th><th>待付稿酬</th><th>版面费 / 预计利润</th><th>操作</th></tr></thead><tbody>${papers.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="paper-meta">${esc(p.code)}</div><div class="cell-sub">${serviceBadge(p)}</div></td><td><div>客户：${esc(p.customer||'未填写')}</div><div class="cell-sub">${hasWriting(p)?`写作者：${esc(p.writer||'未填写')}`:'客户供稿 · 无写作稿酬'}</div></td><td><div class="cell-money">约定 ${yuan(effectiveContract(p))}</div><div class="cell-sub">已收 ${yuan(p.contractReceivedCents)}</div>${!serviceEnded(p)&&p.contractReceivedCents>p.contractCents?'<div class="cell-sub">已收超过约定，请核对</div>':''}</td><td class="cell-money">${yuan(p.receivableCents)}${p.refundableCents?`<div class="cell-sub">待退款 ${yuan(p.refundableCents)}</div>`:''}</td><td>${hasWriting(p)?`<div class="cell-money">约定 ${yuan(effectiveWriterFee(p))}</div><div class="cell-sub">已付 ${yuan(p.writerPaidCents)}</div>${!serviceEnded(p)&&p.writerPaidCents>p.writerFeeCents?'<div class="cell-sub">已付超过约定，请核对</div>':''}`:'<span class="panel-hint">无需写作稿酬</span>'}</td><td class="cell-money">${yuan(p.payableCents)}${p.recoverableCents?`<div class="cell-sub">待追回 ${yuan(p.recoverableCents)}</div>`:''}</td><td><div>${publicationFeeLabels[publicationMode(p)]}</div>${publicationMode(p)==='included'?`<div class="cell-sub">成本 ${yuan(p.publicationFeeCents)} · 待付 ${yuan(p.publicationPayableCents)}</div>`:''}${p.publicationRefundableCents?`<div class="cell-sub">待退回 ${yuan(p.publicationRefundableCents)}</div>`:''}<div class="cell-sub">预计利润 ${p.profitEstimateKnown?yuan(p.estimatedProfitCents):'待核算'}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">${icon('wallet')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
 }
 function renderFinanceProfits() {
  const papers=filteredFinancePapers(),report=financeYearSummary(),paging=pagination(papers.length);
  if(!papers.length){$('#results').innerHTML='<div class="empty-state"><h3>当前范围内暂无已结清利润</h3><p>客户款、写作稿酬与版面费均结清后，才计入净利润；可在应收应付中查看未结款项。</p></div>';return;}
- $('#results').innerHTML=`<div class="results-note">${report.basis==='settled'?'按最后收付或终止结算日期':'按论文建档日期'}归属年度 · 已结清 ${papers.length} 篇 · 净利润 ${yuan(sum(papers,'settledProfitCents'))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell">序号</th><th>关联论文 / 客户</th><th>结清日期</th><th>服务收入</th><th>写作成本</th><th>版面费成本</th><th>其他净收支</th><th>净利润</th><th>操作</th></tr></thead><tbody>${papers.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="cell-sub">${esc(p.code)} · ${esc(p.customer||'未关联客户')}</div></td><td>${dateLabel(financeSettlementDate(p))}</td><td class="cell-money">${yuan(effectiveContract(p))}</td><td>${yuan(effectiveWriterFee(p))}</td><td>${yuan(p.publicationFeeCents)}</td><td>${yuan((p.otherIncomeCents||0)-(p.otherExpenseCents||0))}</td><td class="cell-money">${yuan(p.settledProfitCents)}</td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">详情${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
+ $('#results').innerHTML=`<div class="results-note">${report.basis==='settled'?'按最后收付或终止结算日期':'按论文建档日期'}归属年度 · 已结清 ${papers.length} 篇 · 净利润 ${yuan(sum(papers,'settledProfitCents'))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell">序号</th><th>关联论文 / 客户</th><th>结清日期</th><th>服务收入</th><th>写作成本</th><th>版面费成本</th><th>其他净收支</th><th>净利润</th><th>操作</th></tr></thead><tbody>${papers.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((p,index)=>`<tr>${sequenceCell(index)}<td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(p.id)}">${esc(p.title)}</button><div class="cell-sub">${esc(p.code)} · ${esc(p.customer||'未关联客户')}</div></td><td>${dateLabel(financeSettlementDate(p))}</td><td class="cell-money">${yuan(effectiveContract(p))}</td><td>${yuan(effectiveWriterFee(p))}</td><td>${yuan(p.publicationFeeCents)}</td><td>${yuan((p.otherIncomeCents||0)-(p.otherExpenseCents||0))}</td><td class="cell-money">${yuan(p.settledProfitCents)}</td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(p.id)}">${icon('wallet')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
 }
 function renderFinanceResults() {
  if(state.financeType==='balances')return renderFinanceBalances();
@@ -320,7 +336,7 @@ function renderFinanceResults() {
   $('#results').innerHTML=`<div class="empty-state"><div class="empty-illustration">${icon('wallet')}</div><h3>${hasTransactions?'没有符合条件的流水':'还没有收支流水'}</h3><p>${hasTransactions?'试试其他关键词、收支日期或分类。':'费用约定与待收待付可在“应收应付”中查看。实际收付款需进入论文详情逐笔登记。'}</p>${hasTransactions?btn('clear-filters','重置筛选','refresh'):btn('finance-tab','查看应收应付','chevron','','data-type="balances"')}</div>`;
   return;
  }
- $('#results').innerHTML = `<div class="results-note">当前筛选：收入 ${yuan(txs.filter(t=>t.type.startsWith('incoming')).reduce((n,t)=>n+transactionAmount(t),0))} &nbsp; · &nbsp; 支出 ${yuan(txs.filter(t=>t.type.startsWith('outgoing')).reduce((n,t)=>n+transactionAmount(t),0))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>收支日期</th><th>关联论文</th><th>客户 / 写作者</th><th>收支类型</th><th>金额</th><th>收付方式 / 备注</th><th>操作</th></tr></thead><tbody>${txs.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((tx,index)=>`<tr>${sequenceCell(index)}<td>${dateLabel(tx.date)}</td><td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${esc(tx.paper.title)}</button><div class="paper-meta">${esc(tx.paper.code)}</div></td><td>${esc(publicationTypes.includes(tx.type)?tx.paper.journal||'期刊':['outgoing_refund','incoming_settlement','incoming_deposit','incoming_balance'].includes(tx.type)?tx.paper.customer||'—':tx.type==='incoming_writer_refund'?tx.paper.writer||'—':tx.type.startsWith('incoming')?tx.paper.customer||'—':tx.paper.writer||'—')}</td><td><span class="cash-label ${tx.type.startsWith('outgoing')?'outgoing':''}">${tx.reversalOf?'冲销 · ':''}${typeLabels[tx.type]}${tx.reversed?'（已冲销）':''}</span></td><td class="finance-amount ${tx.type.startsWith('incoming')?'incoming':'outgoing'}">${tx.type.startsWith('incoming')?'+':'−'}${yuan(transactionAmount(tx))}</td><td><div>${esc(tx.method||'—')}</div><div class="cell-sub" title="${esc(tx.note)}">${esc(tx.note.length>24?tx.note.slice(0,24)+'…':tx.note||'无备注')}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(tx.paper.id)}">详情${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
+ $('#results').innerHTML = `<div class="results-note">当前筛选：收入 ${yuan(txs.filter(t=>t.type.startsWith('incoming')).reduce((n,t)=>n+transactionAmount(t),0))} &nbsp; · &nbsp; 支出 ${yuan(txs.filter(t=>t.type.startsWith('outgoing')).reduce((n,t)=>n+transactionAmount(t),0))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>收支日期</th><th>关联论文</th><th>客户 / 写作者</th><th>收支类型</th><th>金额</th><th>收付方式 / 备注</th><th>操作</th></tr></thead><tbody>${txs.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((tx,index)=>`<tr>${sequenceCell(index)}<td>${dateLabel(tx.date)}</td><td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${esc(tx.paper.title)}</button><div class="paper-meta">${esc(tx.paper.code)}</div></td><td>${esc(publicationTypes.includes(tx.type)?tx.paper.journal||'期刊':['outgoing_refund','incoming_settlement','incoming_deposit','incoming_balance'].includes(tx.type)?tx.paper.customer||'—':tx.type==='incoming_writer_refund'?tx.paper.writer||'—':tx.type.startsWith('incoming')?tx.paper.customer||'—':tx.paper.writer||'—')}</td><td><span class="cash-label ${tx.type.startsWith('outgoing')?'outgoing':''}">${tx.reversalOf?'冲销 · ':''}${typeLabels[tx.type]}${tx.reversed?'（已冲销）':''}</span></td><td class="finance-amount ${tx.type.startsWith('incoming')?'incoming':'outgoing'}">${tx.type.startsWith('incoming')?'+':'−'}${yuan(transactionAmount(tx))}</td><td><div>${esc(tx.method||'—')}</div><div class="cell-sub" title="${esc(tx.note)}">${esc(tx.note.length>24?tx.note.slice(0,24)+'…':tx.note||'无备注')}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${icon('wallet')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
 }
 
 function renderSettings() {
@@ -335,7 +351,7 @@ function setOverlay(html) {
  requestAnimationFrame(()=>{ const first=$('[autofocus]', $('#overlay-root'))||$('input:not([type=hidden]),button,select,textarea', $('#overlay-root')); first?.focus(); });
 }
 function closeOverlay() { overlayRevision++;clearTimeout(credentialTimer); state.drawer=null;state.modal=null;$('#overlay-root').innerHTML='';document.body.style.overflow='';if(previousFocus?.isConnected)previousFocus.focus(); }
-const managedForms=['auth-form','paper-form','customer-form','submission-form','transaction-form','password-form','restore-form','termination-form','publication-fee-form','reversal-form','receipt-form'];
+const managedForms=['auth-form','paper-form','customer-form','submission-form','transaction-form','password-form','restore-form','termination-form','publication-fee-form','reversal-form','receipt-form','followup-form'];
 function formGuide() { return '<p class="form-guide"><span class="required-mark">必填</span> 标记项必须填写，其余可选。</p>'; }
 function formFeedback() { return '<div class="error-message form-feedback" role="alert" aria-live="assertive" tabindex="-1"></div>'; }
 function formControls(form) { return Array.from(form.elements||[]).filter(control=>control.name&&!control.disabled&&!['hidden','submit','button','reset'].includes(control.type)); }
@@ -353,13 +369,16 @@ function updateFormRequirements(form) {
  if(['paper-form','publication-fee-form','submission-form'].includes(form.id))updatePublicationFeeForm(form);
  if(form.id==='paper-form'){
   const controls=formControls(form),date=controls.find(c=>c.name==='followUpAt'),reason=controls.find(c=>c.name==='followUpReason');
-  if(reason){reason.required=Boolean(date?.value);markRequired(reason);}updateWriterPaymentForm(form);return;
+  if(reason){reason.required=Boolean(date?.value);markRequired(reason);}updateWriterPaymentForm(form);updateCustomerReceiptForm(form);return;
  }
  if(form.id==='transaction-form'){updateTransactionPayment(form);return;}
  if(form.id!=='submission-form')return;
  const controls=formControls(form),status=controls.find(control=>control.name==='status'),date=controls.find(control=>control.name==='submittedAt');
  if(!status||!date)return;
  date.required=!['草稿','待投稿'].includes(status.value);markRequired(date);
+ const expected=form.elements.namedItem('expectedPublishedAt'),accepted=['已录用','已发表'].includes(status.value),ended=form.elements.namedItem('endedAt');
+ if(ended){ended.required=status.value==='已录用';markRequired(ended);const endHint=$('#f-endedAt-hint',form);if(endHint)endHint.textContent=ended.required?'请填写实际录用日期，不能早于投稿日期或晚于今天。':'不能早于投稿日期；结束状态留空默认今天。';}
+ if(expected){expected.disabled=false;const end=controls.find(control=>control.name==='endedAt')?.value;if(end){const next=new Date(end+'T00:00:00');next.setDate(next.getDate()+1);expected.min=next.getFullYear()+'-'+String(next.getMonth()+1).padStart(2,'0')+'-'+String(next.getDate()).padStart(2,'0');}else expected.removeAttribute?.('min');}
  const hint=$('#f-submittedAt-hint',form);
  if(hint)hint.textContent=date.required?'当前状态必须填写实际投稿日期。':'草稿、待投稿可留空；已投稿及后续状态必须填写。';
 }
@@ -424,7 +443,7 @@ function validateForm(form) {
   if(value('writingStartAt')&&value('writingDueAt')&&value('writingDueAt')<value('writingStartAt'))add('writingDueAt','预计交稿日期不能早于写作开始日期');
   if(value('writingDeliveredAt')&&value('writingStartAt')&&value('writingDeliveredAt')<value('writingStartAt'))add('writingDeliveredAt','实际交稿日期不能早于写作开始日期');
   if(Number(value('writerDepositAmount'))>Number(value('writerFee')))add('writerDepositAmount','约定定金不能超过稿酬总额');
-  for(const [name,message] of writerPaymentIssues(form))add(name,message);
+  for(const [name,message] of [...writerPaymentIssues(form),...customerReceiptIssues(form)])add(name,message);
  }
  if(['paper-form','publication-fee-form','submission-form'].includes(form.id)&&value('publicationFeeMode')==='included'&&!(moneyCents(value('publicationFeeAmount'))>0))add('publicationFeeAmount','请填写我方承担的版面费金额，必须大于 0');
  if(form.id==='transaction-form'&&state.drawer?.paper){
@@ -432,6 +451,7 @@ function validateForm(form) {
   if(limit!==null&&moneyCents(value('amount'))>limit)add('amount','本次收付金额不能超过剩余约定金额 '+yuan(limit));
  }
  if(form.id==='submission-form') {
+  const expected=value('expectedPublishedAt');if(expected&&value('endedAt')&&expected<=value('endedAt'))add('expectedPublishedAt','预计发表日期必须晚于录用日期');
   const start=value('submittedAt'),end=value('endedAt'),published=value('publishedAt'),finished=['已录用','已发表','已拒稿','已撤稿'].includes(value('status'));
   if(finished&&start&&end&&end<start)add('endedAt','结束日期不能早于实际投稿日期');
   if(value('status')==='已发表'&&start&&published&&published<start)add('publishedAt','发表日期不能早于实际投稿日期');
@@ -451,7 +471,7 @@ document.addEventListener('input',event=>{
  if(!form||!managedForms.includes(form.id))return;
  if(form.id==='paper-form'&&['contractAmount','contractDepositAmount'].includes(control.name))updateContractBalance(form);
  if(form.id==='paper-form'&&['writingStatus','writingDeliveredAt'].includes(control.name))updateWritingStatus(form);
- if(form.id==='paper-form')updateWriterPaymentForm(form);
+ if(form.id==='paper-form'){updateWriterPaymentForm(form);updateCustomerReceiptForm(form);}
  if(form.id==='transaction-form')updateTransactionPayment(form);
  if(control.getAttribute?.('aria-invalid')==='true')fieldError(control,fieldValidationMessage(control));
  const summary=$('.error-message',form);if(summary?.dataset?.validation==='field')summary.textContent='';
@@ -478,24 +498,24 @@ function renderDetail() {
  const {paper:p,tab}=state.drawer;
  setOverlay(`<div class="overlay"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <header class="drawer-head"><div><h2 id="drawer-title">${esc(p.title)}</h2><p>${esc(p.code)} &nbsp; · &nbsp; ${esc(p.authors||'未填写作者')}</p></div><button class="icon-btn" data-action="close" aria-label="关闭">${icon('close')}</button></header>
-  <div class="detail-tabs" role="tablist">${[['basic','论文详情'],['submissions','投稿记录'],['files',`文件与版本（${sortedManuscripts(p).length}）`],['finance','收支明细'],['history','变更历史']].map(([id,label])=>`<button class="tab ${tab===id?'active':''}" data-action="detail-tab" data-tab="${id}" role="tab" aria-selected="${tab===id}">${label}</button>`).join('')}</div>
-  <div class="drawer-body" id="detail-body">${tab==='basic'?basicDetail(p):tab==='finance'?financeDetail(p):tab==='submissions'?submissionCards(p):tab==='files'?fileVersions(p):historyDetail(p)}</div>
-  <footer class="drawer-foot">${p.transactions?.length?'<span class="panel-hint">有账务记录，不能删除</span>':btn('delete-paper','删除','trash','danger small')}<div class="actions">${btn('add-transaction','新增','wallet')}${btn('close','关闭')}${serviceEnded(p)?'':btn('edit-paper','编辑','edit','primary')}</div></footer>
+  <div class="detail-tabs" role="tablist">${[['basic','论文详情'],['submissions','投稿记录'],['followups','跟进事项'],['files',`文件与版本（${sortedManuscripts(p).length}）`],['finance','收支明细'],['history','变更历史']].map(([id,label])=>`<button class="tab ${tab===id?'active':''}" data-action="detail-tab" data-tab="${id}" role="tab" aria-selected="${tab===id}">${label}</button>`).join('')}</div>
+  <div class="drawer-body" id="detail-body">${tab==='basic'?basicDetail(p):tab==='finance'?financeDetail(p):tab==='submissions'?submissionCards(p):tab==='files'?fileVersions(p):tab==='followups'?followUpDetail(p):historyDetail(p)}</div>
+  <footer class="drawer-foot"><span class="panel-hint">${tab==='followups'?'事项处理与历史记录':'查看记录'}</span><div class="actions">${btn('close','关闭')}</div></footer>
  </section></div>`);
 }
 function basicDetail(p) {
- return settlementSummary(p)+manuscriptSummary(p)+writingOverview(p)+`<div class="detail-meta">${detailField('当前状态',badge(p.status))}${detailField('客户 / 委托人',esc(p.customer))}${hasWriting(p)?detailField('写作者 / 合作人',esc(p.writer)):''}${detailField('作者',esc(p.authors))}${detailField('投稿期刊',esc(p.journal))}${detailField('投稿系统',esc(p.submissionSystem))}${detailField('投稿日期',dateLabel(p.submittedAt))}${detailField('下次跟进',`${serviceEnded(p)?'服务已终止 · 原计划 ':''}${dateLabel(p.followUpAt)}${due(p)?' <span class="due-date">已到跟进时间</span>':''}`)}${detailField('跟进事项 / 由来',`<span class="follow-up-reason">${esc(followUpReasonLabel(p))}</span>`,true)}${detailField('投稿网址',p.submissionUrl?`<a href="${esc(p.submissionUrl)}" target="_blank" rel="noopener noreferrer">${esc(p.submissionUrl)} ${icon('link')}</a>`:'',true)}</div><div class="credential-box"><h3 class="section-heading">${icon('lock')}账号与绑定信息</h3><div class="detail-meta">${detailField('投稿账号',esc(p.submissionAccount))}${detailField('投稿密码',p.hasPassword?`<div class="password-row"><span id="password-value" class="password-value">••••••••••</span><button class="text-btn" data-action="reveal-password" id="reveal-button">${icon('eye')}显示</button></div>`:'未保存')}${detailField('绑定邮箱',esc(p.boundEmail))}${detailField('绑定手机号',esc(p.boundPhone))}</div></div><div class="section-heading" style="margin-top:26px">${icon('document')}备注</div><div class="detail-note">${esc(p.notes||'暂无备注')}</div><p class="panel-hint" style="margin-top:20px">建立于 ${instantLabel(p.createdAt)} &nbsp; · &nbsp; 更新于 ${instantLabel(p.updatedAt)}</p>`;
+ return `<div class="actions" style="margin-bottom:18px">${btn('new-followup','新增跟进事项','plus','',`data-id="${esc(p.id)}"`)}${btn('followup-detail','查看跟进事项','','',`data-id="${esc(p.id)}"`)}</div>`+settlementSummary(p)+manuscriptSummary(p)+writingOverview(p)+`<div class="detail-meta">${detailField('当前状态',badge(p.status))}${detailField('客户 / 委托人',esc(p.customer))}${hasWriting(p)?detailField('写作者 / 合作人',esc(p.writer)):''}${detailField('作者',esc(p.authors))}${detailField('作者简介',`<span class="author-bio-text">${esc(p.authorBio||'未填写')}</span>`,true)}${detailField('投稿期刊',esc(p.journal))}${detailField('投稿系统',esc(p.submissionSystem))}${detailField('投稿日期',dateLabel(p.submittedAt))}${detailField('下次跟进',`${serviceEnded(p)?'服务已终止 · 原计划 ':''}${dateLabel(p.followUpAt)}${due(p)?' <span class="due-date">已到跟进时间</span>':''}`)}${detailField('跟进事项 / 由来',`<span class="follow-up-reason">${esc(followUpReasonLabel(p))}</span>`,true)}${detailField('投稿网址',p.submissionUrl?`<a href="${esc(p.submissionUrl)}" target="_blank" rel="noopener noreferrer">${esc(p.submissionUrl)} ${icon('link')}</a>`:'',true)}</div><div class="credential-box"><h3 class="section-heading">${icon('lock')}账号与绑定信息</h3><div class="detail-meta">${detailField('投稿账号',esc(p.submissionAccount))}${detailField('投稿密码',p.hasPassword?`<div class="password-row"><span id="password-value" class="password-value">••••••••••</span><button class="text-btn" data-action="reveal-password" id="reveal-button">${icon('eye')}显示</button></div>`:'未保存')}${detailField('绑定邮箱',esc(p.boundEmail))}${detailField('绑定手机号',esc(p.boundPhone))}</div></div><div class="section-heading" style="margin-top:26px">${icon('document')}备注</div><div class="detail-note">${esc(p.notes||'暂无备注')}</div><p class="panel-hint" style="margin-top:20px">建立于 ${instantLabel(p.createdAt)} &nbsp; · &nbsp; 更新于 ${instantLabel(p.updatedAt)}</p>`;
 }
 function financeDetail(p) {
  const transactions=[...p.transactions].sort((a,b)=>b.date.localeCompare(a.date)||b.createdAt.localeCompare(a.createdAt));
- return `${profitSummary(p)}${settlementSummary(p)}${publicationFeeSummary(p)}${writingPaymentSummary(p,true)}${serviceEnded(p)?'':`<div class="money-grid"><div class="money-box"><label>已收定金尾款 / 约定应收</label><strong>${yuan(p.contractReceivedCents)}</strong><small>约定 ${yuan(p.contractCents)} · 未收 ${yuan(p.receivableCents)}</small><small>约定定金 ${yuan(p.contractDepositCents)} · 尾款 ${yuan((p.contractCents||0)-(p.contractDepositCents||0))}</small></div>${hasWriting(p)?`<div class="money-box"><label>已付稿酬 / 约定稿酬</label><strong>${yuan(p.writerPaidCents)}</strong><small>约定 ${yuan(p.writerFeeCents)} · 未付 ${yuan(p.payableCents)}</small></div>`:`<div class="money-box"><label>半包 · 客户供稿</label><strong>无需写作稿酬</strong><small>版面费单独登记，其他费用记入其他支出</small></div>`}</div>${p.contractReceivedCents>p.contractCents||p.writerPaidCents>p.writerFeeCents?`<div class="notice">${icon('info')}累计实际收款或付款已超过对应约定金额，请核对费用约定与流水。</div>`:''}`}<div class="panel-header" style="padding:6px 0"><h3 class="panel-title">收支流水 <small>${p.transactions.length} 笔</small></h3>${btn('add-transaction','新增','plus','small')}</div><div class="transaction-list">${transactions.length?transactions.map((tx,index)=>financialRow(p,tx,index)).join(''):'<div class="empty-small" style="padding:45px 10px">暂无流水。登记定金、尾款，让每笔收支清晰可查。</div>'}</div><div class="detail-note" style="margin-top:20px">现金净额：${yuan(p.netCents)}（实际已收 − 实际已付）<br>其他收入：${yuan(p.otherIncomeCents)} · 其他支出：${yuan(p.otherExpenseCents)}<br>其他收支单独计入利润，不抵扣应收尾款、应付稿酬或版面费。</div>${financialAudit(p)}`;
+ return `${profitSummary(p)}${settlementSummary(p)}${publicationFeeSummary(p)}${customerReceiptSummary(p)}${writingPaymentSummary(p,true)}${serviceEnded(p)?'':`<div class="money-grid"><div class="money-box"><label>已收定金尾款 / 约定应收</label><strong>${yuan(p.contractReceivedCents)}</strong><small>约定 ${yuan(p.contractCents)} · 未收 ${yuan(p.receivableCents)}</small><small>约定定金 ${yuan(p.contractDepositCents)} · 尾款 ${yuan((p.contractCents||0)-(p.contractDepositCents||0))}</small></div>${hasWriting(p)?`<div class="money-box"><label>已付稿酬 / 约定稿酬</label><strong>${yuan(p.writerPaidCents)}</strong><small>约定 ${yuan(p.writerFeeCents)} · 未付 ${yuan(p.payableCents)}</small></div>`:`<div class="money-box"><label>半包 · 客户供稿</label><strong>无需写作稿酬</strong><small>版面费单独登记，其他费用记入其他支出</small></div>`}</div>${p.contractReceivedCents>p.contractCents||p.writerPaidCents>p.writerFeeCents?`<div class="notice">${icon('info')}累计实际收款或付款已超过对应约定金额，请核对费用约定与流水。</div>`:''}`}<div class="panel-header" style="padding:6px 0"><h3 class="panel-title">收支流水 <small>${p.transactions.length} 笔</small></h3>${btn('add-transaction','新增','plus','small')}</div><div class="transaction-list">${transactions.length?transactions.map((tx,index)=>financialRow(p,tx,index)).join(''):'<div class="empty-small" style="padding:45px 10px">暂无流水。登记定金、尾款，让每笔收支清晰可查。</div>'}</div><div class="detail-note" style="margin-top:20px">现金净额：${yuan(p.netCents)}（实际已收 − 实际已付）<br>其他收入：${yuan(p.otherIncomeCents)} · 其他支出：${yuan(p.otherExpenseCents)}<br>其他收支单独计入利润，不抵扣应收尾款、应付稿酬或版面费。</div>${financialAudit(p)}`;
 }
 function historyDetail(p) {
  return `<div class="notice green" style="margin-bottom:27px">${icon('info')}修改期刊、投稿系统、投稿网址、投稿日期或状态时，会自动保留该次变更。</div><div class="timeline">${[...p.history].reverse().map((e,index)=>`<div class="timeline-item"><h3>${sequenceBadge(index)}${esc(e.action)} &nbsp; ${badge(e.status)}</h3><p>期刊：${esc(e.journal||'未填写')}<br>系统：${esc(e.submissionSystem||'未填写')}<br>投稿日期：${dateLabel(e.submittedAt)}</p>${e.submissionUrl?`<p>${esc(e.submissionUrl)}</p>`:''}<time>${instantLabel(e.at)}</time></div>`).join('')}</div>`;
 }
 function transactionForm(selectedType='',publicationAccountId=state.drawer?.publicationAccountId||'') {
  clearTimeout(credentialTimer);state.drawer.kind='transaction';state.drawer.publicationAccountId=publicationAccountId; const p=state.drawer.paper;
- setOverlay(`<div class="overlay"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><header class="drawer-head"><div><h2 id="drawer-title">${selectedType==='outgoing_deposit'?'登记已付定金':selectedType==='outgoing_balance'?'登记已付尾款':'新增收支'}</h2><p>${esc(p.title)}</p></div><button class="icon-btn" data-action="close" aria-label="关闭">${icon('close')}</button></header><form id="transaction-form" novalidate style="display:contents"><div class="drawer-body"><div class="notice green" style="margin-bottom:25px">${icon('info')}按实际收付逐笔登记。稿酬、版面费与其他支出分别记录；作者自理版面费不登记我方流水。</div><div class="form-grid"><div class="field full"><label for="tx-type">收支类型 <span class="required-mark">必填</span></label><select id="tx-type" name="type" required><optgroup label="收入 / 费用退回">${Object.entries(typeLabels).filter(([k])=>k.startsWith('incoming')&&transactionTypeAllowed(p,k)).map(([k,v])=>`<option value="${k}" ${k===selectedType?'selected':''}>${v}</option>`).join('')}</optgroup><optgroup label="支出">${Object.entries(typeLabels).filter(([k])=>k.startsWith('outgoing')&&transactionTypeAllowed(p,k)).map(([k,v])=>`<option value="${k}" ${k===selectedType?'selected':''}>${v}</option>`).join('')}</optgroup></select></div>${field('amount','本次实际收付金额（元）',selectedType&&transactionRemaining(p,selectedType)!==null?(transactionRemaining(p,selectedType)/100).toFixed(2):'',{type:'number',required:true,min:0.01,placeholder:'例如：2000.00',hint:'必须大于 0，最多两位小数。'})}<div class="field"><label for="tx-date">收付日期 <span class="required-mark">必填</span></label><input id="tx-date" name="date" type="date" required value="${today()}" max="${today()}"></div>${publicationAccountSelect(p)}${transactionPaymentFields()}<div class="field full payment-confirm" data-publication-payment-confirm hidden><label><input type="checkbox" name="confirmPublicationPayment" value="yes">确认这笔版面费已经实际支付或退回。</label></div>${serviceEnded(p)?settlementPaymentConfirmation():''}${field('method','收付方式','',{max:80,full:true,placeholder:'例如：银行转账、微信、支付宝'})}${field('note','收支备注','',{textarea:true,full:true,max:1000,placeholder:'例如：首笔定金、录用后尾款、转账凭证号…'})}</div></div><footer class="drawer-foot">${formFeedback()}<span class="panel-hint">逐笔记录，自动汇总</span><div class="actions">${btn('cancel-transaction','返回')}<button class="btn primary" type="submit">${icon('check')}保存</button></div></footer></form></section></div>`);
+ setOverlay(`<div class="overlay"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><header class="drawer-head"><div><h2 id="drawer-title">${selectedType==='incoming_deposit'?'登记已收定金':selectedType==='incoming_balance'?'登记已收尾款':selectedType==='outgoing_deposit'?'登记已付定金':selectedType==='outgoing_balance'?'登记已付尾款':'新增收支'}</h2><p>${esc(p.title)}</p></div><button class="icon-btn" data-action="close" aria-label="关闭">${icon('close')}</button></header><form id="transaction-form" novalidate style="display:contents"><div class="drawer-body"><div class="notice green" style="margin-bottom:25px">${icon('info')}按实际收付逐笔登记。稿酬、版面费与其他支出分别记录；作者自理版面费不登记我方流水。</div><div class="form-grid"><div class="field full"><label for="tx-type">收支类型 <span class="required-mark">必填</span></label><select id="tx-type" name="type" required><optgroup label="收入 / 费用退回">${Object.entries(typeLabels).filter(([k])=>k.startsWith('incoming')&&transactionTypeAllowed(p,k)).map(([k,v])=>`<option value="${k}" ${k===selectedType?'selected':''}>${v}</option>`).join('')}</optgroup><optgroup label="支出">${Object.entries(typeLabels).filter(([k])=>k.startsWith('outgoing')&&transactionTypeAllowed(p,k)).map(([k,v])=>`<option value="${k}" ${k===selectedType?'selected':''}>${v}</option>`).join('')}</optgroup></select></div>${field('amount','本次实际收付金额（元）',selectedType&&transactionRemaining(p,selectedType)!==null?(transactionRemaining(p,selectedType)/100).toFixed(2):'',{type:'number',required:true,min:0.01,placeholder:'例如：2000.00',hint:'必须大于 0，最多两位小数。'})}<div class="field"><label for="tx-date">收付日期 <span class="required-mark">必填</span></label><input id="tx-date" name="date" type="date" required value="${today()}" max="${today()}"></div>${publicationAccountSelect(p)}${transactionPaymentFields()}<div class="field full payment-confirm" data-publication-payment-confirm hidden><label><input type="checkbox" name="confirmPublicationPayment" value="yes">确认这笔版面费已经实际支付或退回。</label></div>${serviceEnded(p)?settlementPaymentConfirmation():''}${field('method','收付方式','',{max:80,full:true,placeholder:'例如：银行转账、微信、支付宝'})}${field('note','收支备注','',{textarea:true,full:true,max:1000,placeholder:'例如：首笔定金、录用后尾款、转账凭证号…'})}</div></div><footer class="drawer-foot">${formFeedback()}<span class="panel-hint">逐笔记录，自动汇总</span><div class="actions">${btn('cancel-transaction','返回')}<button class="btn primary" type="submit">${icon('check')}保存</button></div></footer></form></section></div>`);
 }
 
 function confirmModal(title,message,action,label='确定',danger=false) {
@@ -513,13 +533,14 @@ function cancelModal() {
 }
 function restoreModal() {
  state.modal={kind:'restore'};
- setOverlay(`<div class="overlay modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">从加密备份恢复</h2><p>这将替换当前账号的全部论文、稿件文件及流水。请先在设置中下载当前账号的备份，恢复后仍使用当前账号与管理密码。</p><form id="restore-form" novalidate><div class="form-grid"><div class="field full"><label for="backup-file">备份文件<span class="required-mark">必填</span></label><input id="backup-file" name="file" type="file" accept=".vault,.bak,.zip" required></div><div class="field full"><label for="backup-password">备份时使用的密码<span class="required-mark">必填</span></label><input id="backup-password" name="password" type="password" autocomplete="off" required maxlength="128"></div><div class="field full"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" required style="width:auto">我已备份当前账号的数据，确认替换该账号的全部记录</label></div></div><div class="error-message" role="alert"></div><div class="actions">${btn('close','取消')}<button type="submit" class="btn danger">确认恢复</button></div></form></section></div>`);
+ setOverlay(`<div class="overlay modal-overlay"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">从加密备份恢复</h2><p>这将替换当前账号的全部论文、稿件文件及流水。请先在设置中下载当前账号的备份，恢复后仍使用当前账号与管理密码。</p><form id="restore-form" novalidate><div class="form-grid"><div class="field full"><label for="backup-file">备份文件<span class="required-mark">必填</span></label><input id="backup-file" name="file" type="file" accept=".vault,.bak,.zip" required></div><div class="field full"><label for="backup-password">备份时使用的密码<span class="required-mark">必填</span></label><input id="backup-password" name="password" type="password" autocomplete="off" required maxlength="128"></div><div class="field full"><label class="choice-label"><input type="checkbox" required>我已备份当前账号的数据，确认替换该账号的全部记录</label></div></div><div class="error-message" role="alert"></div><div class="actions">${btn('close','取消')}<button type="submit" class="btn danger">确认恢复</button></div></form></section></div>`);
 }
 
 function download(name,blob) { const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000); }
 function csvCell(value) { let text=String(value??'');if(/^[\s]*[=+\-@\t\r]/.test(text))text="'"+text;return '"'+text.replaceAll('"','""')+'"'; }
 function csvDownload(name,rows) { const numbered=rows.map((row,index)=>[index===0?'序号':index,...row]);const csv='\uFEFF'+numbered.map(row=>row.map(csvCell).join(',')).join('\r\n');download(name,new Blob([csv],{type:'text/csv;charset=utf-8'})); }
 function exportPapers() {
+ if(state.view==='followups')return exportFollowUps();
  const list=filteredPapers();if(!list.length)return toast('当前筛选下没有可导出的记录',true);
  const headers=['编号','论文题目','服务类型','作者','客户','写作者','投稿期刊','投稿系统','投稿网址','投稿日期','当前状态','跟进日期','跟进事项 / 由来','约定应收（元）','收款定金（元）','收款尾款（元）','稿酬总额（元）','已收定金（元）','已收尾款（元）','其他收入（元）','已付定金（元）','已付尾款（元）','其他支出（元）','已收总额（元）','已付总额（元）','未收（元）','未付（元）','备注'];
  const txsum=(p,type)=>p.transactions.filter(t=>t.type===type).reduce((n,t)=>n+transactionAmount(t),0)/100;
@@ -530,7 +551,7 @@ function exportFinanceYear() {
  const rows=[['统计范围','项目','金额（元）','统计口径'],
   [scope,'累计收款',report.received/100,'按收付日期，包含费用退回及其他收入'],
   [scope,'累计付款',report.paid/100,'按收付日期，包含客户退款及其他支出'],
-  [scope,'净现金流',report.cashNet/100,'累计收款 − 累计付款'],
+  [scope,'净利润',report.cashNet/100,'累计收款 − 累计付款'],
   [scope,'待收服务费',report.receivable/100,'该年建档论文的当前待收余额'],
   [scope,'待付写作稿酬',report.writerPayable/100,'该年建档论文的当前待付余额'],
   [scope,'待付版面费',report.publicationPayable/100,'该年建档论文的当前待付余额'],
@@ -579,6 +600,13 @@ document.addEventListener('click', async event => {
    button.setAttribute('aria-pressed',String(visible));button.setAttribute('aria-label',label);button.title=label;
    button.innerHTML=icon(visible?'eyeOff':'eye');
   }
+  else if(['new-followup','edit-followup','complete-followup','reopen-followup'].includes(action)) {
+   button.disabled=true;
+   await openFollowUpEditor(button.dataset.id||'',button.dataset.taskId||'',action==='complete-followup'?'complete':action==='reopen-followup'?'reopen':'edit');
+  }
+  else if(action==='followup-detail')await openDetail(button.dataset.id,'followups');
+  else if(action==='followup-task-detail')await openFollowUpTaskDetail(button.dataset.id,button.dataset.taskId);
+  else if(action==='cancel-followup')cancelFollowUpEditor();
   else if(action==='change-password'){state.view='settings';renderShell();$('#current-password')?.focus();}
   else if(action==='terminate-service')openTerminationForm();
   else if(action==='cancel-termination')cancelTermination();
@@ -607,7 +635,7 @@ document.addEventListener('click', async event => {
   else if(action==='cancel-publication-fee'){state.drawer.kind='detail';state.drawer.tab='finance';renderDetail();}
   else if(action==='publication-payment')transactionForm(button.dataset.type,button.dataset.accountId||'');
   else if(action==='add-transaction')transactionForm();
-  else if(action==='writer-payment'){
+  else if(action==='writer-payment'||action==='customer-payment'){
    button.disabled=true;
    const current=beginDrawerRequest();
    const paper=await api(`/api/papers/${encodeURIComponent(button.dataset.id)}`);
@@ -631,7 +659,7 @@ document.addEventListener('click', async event => {
    if(!id)throw new Error('请选择要删除的论文');
    const p=await api(`/api/papers/${encodeURIComponent(id)}`);
    if(!current())return;
-   confirmModal('确认删除？',`“${p.title}”（${p.code}）\n一并删除：${hasWriting(p)?'写作安排、':''}${p.submissions?.length||0} 次投稿（含账号、历史）、${sortedManuscripts(p).length} 个稿件版本和 ${p.transactions?.length||0} 笔收支。\n客户和其他记录保留。此操作无法撤销。`,async()=>{
+   confirmModal('确认删除？',`“${p.title}”（${p.code}）\n一并删除：${hasWriting(p)?'写作安排、':''}${p.submissions?.length||0} 次投稿（含账号、历史）、${sortedManuscripts(p).length} 个稿件版本和 ${p.transactions?.length||0} 笔收支及财务记录。\n客户和其他论文保留。删除会清除该论文的全部数据，此操作无法撤销。`,async()=>{
     const origin=saveContext();
     await request('DELETE',`/api/papers/${encodeURIComponent(p.id)}`,{version:p.version});
     if(origin.csrf!==state.csrf)return;dataLoadSequence++;
@@ -653,7 +681,9 @@ document.addEventListener('click', async event => {
   }
   else if(action==='restore')restoreModal();
   else if(action==='logout') {
-   await request('POST','/api/logout');state.authenticated=false;state.authMode='login';state.papers=[];state.customers=[];state.initialized=true;state.csrf='';closeOverlay();renderAuth();toast('退出成功');
+   confirmModal('确认退出系统？','退出后需要重新登录。尚未保存的内容将丢失，请确认已保存。',async()=>{
+    await request('POST','/api/logout');state.authenticated=false;state.authMode='login';state.papers=[];state.customers=[];state.initialized=true;state.csrf='';closeOverlay();renderAuth();toast('退出成功');
+   },'确认退出');
   }
  } catch(error) {
   const errorField=$('.error-message',$('#overlay-root'));
@@ -671,7 +701,7 @@ document.addEventListener('change', event => {
  if(names[event.target.id]){state[names[event.target.id]]=event.target.value;state.page=1;renderResults();}
 });
 document.addEventListener('submit',async event=>{
- if(!['auth-form','paper-form','transaction-form','password-form','restore-form','termination-form','publication-fee-form'].includes(event.target.id))return;
+ if(!['auth-form','paper-form','transaction-form','password-form','restore-form','termination-form','publication-fee-form','followup-form'].includes(event.target.id))return;
  event.preventDefault();const form=event.target;const submit=$('[type=submit]',form);const errorField=$('.error-message',form);
  if(submit?.disabled)return;if(!validateForm(form))return;const submitLabel=submit?.innerHTML;if(submit){submit.disabled=true;if(form.id!=='auth-form')submit.innerHTML='保存中…';}if(errorField)errorField.textContent='';
  const origin=saveContext();
@@ -691,8 +721,10 @@ document.addEventListener('submit',async event=>{
     try { await loadPapers(); } catch(error) { if(state.authenticated)toast('登录成功，列表加载失败，请点击刷新。',true); }
    }
   }
+  else if(form.id==='followup-form')await saveFollowUpForm(form,data,origin);
   else if(form.id==='paper-form') {
-   const drawer=origin.drawer,file=selectedManuscript(form),p=drawer.paper;const payload=writerPaymentPayload(form,data);delete payload.clearPassword;
+   const drawer=origin.drawer,file=selectedManuscript(form),p=drawer.paper;const payload=customerReceiptPayload(writerPaymentPayload(form,data));delete payload.clearPassword;
+   if(payload.customerReceiptTotals&&state.customerReceiptTotalsSupported!==true)throw new Error('收款录入功能已更新，请重启服务并刷新页面后再保存。本次尚未提交。');
    if(payload.writerPayments?.length&&state.writerPaymentsSupported===false)throw new Error('付款录入功能已更新，请重启服务并刷新页面后再保存。本次尚未提交。');
    if(!p&&drawer.createRequestId)payload.createRequestId=drawer.createRequestId;
    if(p){payload.version=p.version;if(data.clearPassword==='on')payload.submissionPassword='';else if(data.submissionPassword==='')delete payload.submissionPassword;}
@@ -701,10 +733,10 @@ document.addEventListener('submit',async event=>{
    if(file&&drawer.pendingManuscript){
     saved=await uploadManuscript(p,file,form);payload.version=saved.version;drawer.paper=saved;drawer.pendingManuscript=false;
     saved=await request('PUT',`/api/papers/${saved.id}`,payload);
-    clearRecordedWriterPayments(form,saved,drawer);
+    clearRecordedWriterPayments(form,saved,drawer);clearRecordedCustomerReceipts(form,saved,drawer);
    }else{
     saved=await request(p?'PUT':'POST',p?`/api/papers/${p.id}`:'/api/papers',payload);
-    clearRecordedWriterPayments(form,saved,drawer);
+    clearRecordedWriterPayments(form,saved,drawer);clearRecordedCustomerReceipts(form,saved,drawer);
     if(file){drawer.paper=saved;drawer.pendingManuscript=true;dataLoadSequence++;state.papers=[saved,...state.papers.filter(item=>item.id!==saved.id)];syncCustomerSummaries();
      try{saved=await uploadManuscript(saved,file,form);drawer.pendingManuscript=false;}catch(error){throw new Error('论文信息已保存，稿件上传失败：'+error.message+'。可再次保存重试。');}}
    }
@@ -759,7 +791,7 @@ document.addEventListener('keydown',event=>{
  const overlay=$('#overlay-root');if(!overlay.hasChildNodes())return;
  if(event.key==='Escape'){
   if(fileTransferBusy){event.preventDefault();return;}
-  event.preventDefault();if(state.modal)cancelModal();else if(['detail','customer-detail'].includes(state.drawer?.kind))closeOverlay();
+  event.preventDefault();if(state.modal)cancelModal();else if(['detail','customer-detail','followup-detail'].includes(state.drawer?.kind))closeOverlay();
  }
  if(event.key==='Tab'){
   const items=[...overlay.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href]')].filter(x=>x.getClientRects().length);
@@ -772,7 +804,7 @@ window.addEventListener('beforeunload',event=>{if(isEditingDrawer()){event.preve
 
 (async()=>{
  try {
-  const session=await api('/api/session');state.writerPaymentsSupported=session.writerPaymentsSupported===true;state.terminationSupported=session.terminationSupported===true;state.publicationFeesSupported=session.publicationFeesSupported===true;state.storage=session.storage||'file';state.fileMaxBytes=session.fileMaxBytes||50*1024*1024;state.initialized=session.initialized;state.authenticated=session.authenticated;state.username=session.username||'';state.csrf=session.csrf;
+  const session=await api('/api/session');state.customerReceiptTotalsSupported=session.customerReceiptTotalsSupported===true;state.customerReceiptsSupported=session.customerReceiptsSupported===true;state.writerPaymentsSupported=session.writerPaymentsSupported===true;state.terminationSupported=session.terminationSupported===true;state.publicationFeesSupported=session.publicationFeesSupported===true;state.storage=session.storage||'file';state.fileMaxBytes=session.fileMaxBytes||50*1024*1024;state.initialized=session.initialized;state.authenticated=session.authenticated;state.username=session.username||'';state.csrf=session.csrf;
   if(session.authenticated)await loadPapers();else renderAuth();
  }catch(error){$('#root').innerHTML=`<div class="empty-state"><h3>工作台暂时无法连接</h3><p>${esc(error.message)}</p><a class="btn" href="/">重新连接</a></div>`;}
 })();

@@ -21,6 +21,7 @@ import test_system
 import test_business
 import test_files
 import test_follow_up
+import test_follow_up_tasks
 import test_authors
 import test_writer_payments
 import test_customer_types
@@ -163,6 +164,40 @@ class MysqlTest(ApiTestCase):
     test_follow_up_roundtrip = test_follow_up.FollowUpTest.test_follow_up_context_roundtrip_updates_backup_and_restart
     test_follow_up_validation = test_follow_up.FollowUpTest.test_new_plan_requires_context_and_failed_updates_are_atomic
     test_follow_up_legacy = test_follow_up.FollowUpTest.test_legacy_backup_keeps_date_and_allows_context_to_be_added
+    save_task = test_follow_up_tasks.FollowUpTasksTest.save_task
+    test_follow_up_tasks_roundtrip = test_follow_up_tasks.FollowUpTasksTest.test_complete_new_request_and_reopen_preserve_history_backup_and_restart
+    test_follow_up_tasks_validation = test_follow_up_tasks.FollowUpTasksTest.test_atomic_validation_concurrent_edits_and_task_ownership
+    test_follow_up_tasks_legacy_editor = test_follow_up_tasks.FollowUpTasksTest.test_old_editor_edits_next_task_without_losing_completed_tasks
+    test_follow_up_tasks_after_publication = test_follow_up_tasks.FollowUpTasksTest.test_new_requests_can_be_followed_after_publication_or_service_termination
+
+    def test_follow_up_tasks_upgrade_retry_and_delete_cascade(self):
+        self.setup_account()
+        paper = self.create(followUpAt='2030-01-12', followUpReason='升级前计划')
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('DROP TABLE lw_follow_up_history')
+        self.sql('DROP TABLE lw_follow_up')
+        self.sql('DELETE FROM lw_schema_version WHERE version=13')
+        self.reset_client()
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        paper = self.call('GET', '/api/papers/' + paper['id'])
+        self.assertEqual('升级前计划', paper['followUps'][0]['content'])
+        paper = self.save_task(paper, paper['followUps'][0], note='继续处理')
+        self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_follow_up'))
+        self.assertEqual('2', self.sql('SELECT COUNT(*) FROM lw_follow_up_history'))
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        self.sql('DELETE FROM lw_schema_version WHERE version=13')
+        self.reset_client()
+        self.start_server()
+        self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
+        restored = self.call('GET', '/api/papers/' + paper['id'])
+        self.assertEqual(paper['followUps'], restored['followUps'])
+        self.assertEqual('1', self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=13'))
+        self.call('DELETE', '/api/papers/' + paper['id'], {'version': restored['version']})
+        self.assertEqual('0', self.sql('SELECT COUNT(*) FROM lw_follow_up'))
+        self.assertEqual('0', self.sql('SELECT COUNT(*) FROM lw_follow_up_history'))
 
     def test_follow_up_schema_upgrade_preserves_old_dates_and_recovers_after_ddl(self):
         self.setup_account()

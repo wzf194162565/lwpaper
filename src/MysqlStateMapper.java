@@ -20,9 +20,9 @@ final class MysqlStateMapper {
     private static Column t(String sql, String field) { return new Column(sql, field, Kind.TIME); }
     private static Table table(String name, String key, Column... columns) { return new Table(name, key, List.of(columns)); }
     static final Table CUSTOMERS = table("lw_customer", "id", s("id","id"),s("name","name"),s("phone","phone"),s("email","email"),s("wechat","wechat"),s("organization","organization"),s("address","address"),s("status","status"),s("customer_type","customerType"),s("referrer","referrer"),d("cooperation_started_at","cooperationStartedAt"),s("notes","notes"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
-    static final Table PAPERS = table("lw_paper", "id",s("id","id"),s("customer_id","customerId"),s("code","code"),s("title","title"),s("authors","authors"),s("service_type","serviceType"),n("contract_cents","contractCents"),n("contract_deposit_cents","contractDepositCents"),d("follow_up_at","followUpAt"),s("follow_up_reason","followUpReason"),s("notes","notes"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
+    static final Table PAPERS = table("lw_paper", "id",s("id","id"),s("customer_id","customerId"),s("code","code"),s("title","title"),s("authors","authors"),s("author_bio","authorBio"),s("service_type","serviceType"),n("contract_cents","contractCents"),n("contract_deposit_cents","contractDepositCents"),d("follow_up_at","followUpAt"),s("follow_up_reason","followUpReason"),s("notes","notes"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table WRITING = table("lw_writing_task", "id",s("id","id"),s("paper_id","paperId"),s("writer_name","writer"),s("status","writingStatus"),d("start_at","writingStartAt"),d("due_at","writingDueAt"),d("delivered_at","writingDeliveredAt"),n("fee_cents","writerFeeCents"),n("deposit_cents","writerDepositCents"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
-    static final Table SUBMISSIONS = table("lw_submission", "id",s("id","id"),s("paper_id","paperId"),s("title","title"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),s("status","status"),s("manuscript_id","manuscriptId"),d("submitted_at","submittedAt"),d("ended_at","endedAt"),d("published_at","publishedAt"),s("notes","notes"),n("sort_order","sortOrder"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
+    static final Table SUBMISSIONS = table("lw_submission", "id",s("id","id"),s("paper_id","paperId"),s("title","title"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),s("status","status"),s("manuscript_id","manuscriptId"),d("submitted_at","submittedAt"),d("ended_at","endedAt"),d("published_at","publishedAt"),d("expected_published_at","expectedPublishedAt"),s("notes","notes"),n("sort_order","sortOrder"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table CREDENTIALS = table("lw_submission_credential", "submission_id",s("submission_id","id"),s("account_name","submissionAccount"),new Column("password_ciphertext","submissionPassword",Kind.SECRET),s("key_fingerprint","keyFingerprint"),s("bound_email","boundEmail"),s("bound_phone","boundPhone"),t("updated_at","updatedAt"));
     static final Table TRANSACTIONS = table("lw_financial_transaction", "id",s("id","id"),s("paper_id","paperId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),s("actor","actor"),s("reversal_of","reversalOf"),s("reversal_reason","reversalReason"),s("corrects_transaction_id","correctsTransactionId"),s("publication_account_id","publicationAccountId"),t("created_at","createdAt"));
     static final Table HISTORY = table("lw_paper_history", "id",s("id","id"),s("paper_id","paperId"),s("submission_ref","submissionId"),s("action","action"),s("status","status"),s("journal","journal"),s("system_name","submissionSystem"),s("system_url","submissionUrl"),d("submitted_at","submittedAt"),n("sort_order","sortOrder"),t("event_at","at"));
@@ -32,7 +32,9 @@ final class MysqlStateMapper {
     static final Table PUBLICATION_FEES=table("lw_paper_publication_fee","paper_id",s("paper_id","paperId"),s("mode","publicationFeeMode"),n("amount_cents","publicationFeeCents"),t("updated_at","updatedAt"));
     static final Table COST_ACCOUNTS=table("lw_publication_account","id",s("id","id"),s("paper_id","paperId"),s("submission_id","submissionId"),s("journal","journal"),s("mode","mode"),n("amount_cents","amountCents"),s("settlement_status","settlementStatus"),n("final_cents","finalCents"),s("legacy","legacy"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table FINANCIAL_AUDIT=table("lw_financial_audit","id",s("id","id"),s("paper_id","paperId"),s("action","action"),s("actor","actor"),t("event_at","at"),s("transaction_id","transactionId"),s("reversal_of","reversalOf"),s("corrects_transaction_id","correctsTransactionId"),s("publication_account_id","publicationAccountId"),s("file_id","fileId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),s("reason","reason"));
-    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,COST_ACCOUNTS,TRANSACTIONS,FINANCIAL_AUDIT,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES);
+    static final Table FOLLOW_UPS=table("lw_follow_up","id",s("id","id"),s("paper_id","paperId"),s("content","content"),d("follow_up_date","date"),s("status","status"),s("note","note"),s("closed_at","closedAt"),t("created_at","createdAt"),t("updated_at","updatedAt"));
+    static final Table FOLLOW_UP_HISTORY=table("lw_follow_up_history","id",s("id","id"),s("paper_id","paperId"),s("content","content"),d("follow_up_date","date"),s("status","status"),s("note","note"),s("closed_at","closedAt"),t("created_at","createdAt"),t("updated_at","updatedAt"),s("task_id","taskId"),t("event_at","at"));
+    static final List<Table> TABLES = List.of(CUSTOMERS,PAPERS,WRITING,FILES,SUBMISSIONS,CREDENTIALS,COST_ACCOUNTS,TRANSACTIONS,FINANCIAL_AUDIT,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES,FOLLOW_UPS,FOLLOW_UP_HISTORY);
 
     MysqlStateMapper(String workspace, DatabaseCrypto crypto) throws Exception { this.workspace=workspace;this.crypto=crypto;fingerprint=crypto.fingerprint(); }
 
@@ -49,6 +51,12 @@ final class MysqlStateMapper {
             for(String field:List.of("writer","writingStartAt","writingDueAt","writingDeliveredAt"))p.put(field,"");
             p.put("writingStatus",BusinessService.hasWriting(p)?"待分配":"");p.put("writerFeeCents",0L);p.put("writerDepositCents",0L);
             String customerId=Main.string(p,"customerId");p.put("customer",customerId.isEmpty()?"":byCustomer.get(customerId).get("name"));
+        }
+        for(Table table:List.of(FOLLOW_UPS,FOLLOW_UP_HISTORY))for(Map<String,Object> task:readTable(connection,table,table==FOLLOW_UPS?"created_at,id":"event_at,id")) {
+            String parent=Main.string(task,"paperId");task.remove("paperId");
+            Map<String,Object> paper=required(byPaper,parent);
+            String field=table==FOLLOW_UPS?"followUps":"followUpHistory";
+            paper.putIfAbsent(field,new ArrayList<>());Json.array(paper.get(field)).add(task);
         }
         for(Map<String,Object> w:readTable(connection,WRITING,"paper_id")) {
             Map<String,Object> p=required(byPaper,Main.string(w,"paperId"));
@@ -165,6 +173,9 @@ final class MysqlStateMapper {
             for(Object itemAccount:PublicationFees.accounts(paper)){Map<String,Object> account=new LinkedHashMap<>(Json.object(itemAccount));account.put("paperId",id);add(result,COST_ACCOUNTS,account);}
             for(Object itemAudit:FinancialLedger.audits(paper)){Map<String,Object> audit=new LinkedHashMap<>(Json.object(itemAudit));audit.put("paperId",id);add(result,FINANCIAL_AUDIT,audit);}
             if(ServiceTermination.ended(paper)) { Map<String,Object> closure=new LinkedHashMap<>(Json.object(paper.get("termination")));closure.put("paperId",id);add(result,TERMINATIONS,closure); }
+            for(Table table:List.of(FOLLOW_UPS,FOLLOW_UP_HISTORY))for(Object itemTask:Json.array(paper.getOrDefault(table==FOLLOW_UPS?"followUps":"followUpHistory",List.of()))) {
+                Map<String,Object> task=new LinkedHashMap<>(Json.object(itemTask));task.put("paperId",id);add(result,table,task);
+            }
             for(Object file:AttachmentService.files(paper)) { Map<String,Object> f=new LinkedHashMap<>(Json.object(file));f.put("paperId",id);add(result,FILES,f); }
             if(BusinessService.hasWriting(paper)) { Map<String,Object> writing=new LinkedHashMap<>(paper);writing.put("paperId",id);add(result,WRITING,writing); }
             int position=0;

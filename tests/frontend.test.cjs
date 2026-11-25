@@ -12,12 +12,13 @@ function app() {
   append(){},remove(){},focus(){},hasChildNodes(){return !!this.innerHTML;},querySelector(){return null;}});
  for(const id of ['#root','#content','#results','#overlay-root','#toast-root'])nodes.set(id,node());
  const context = vm.createContext({console,Blob,URL,Intl,Date,crypto:require('node:crypto').webcrypto,setTimeout:()=>1,clearTimeout(){},requestAnimationFrame(){},
-  fetch:async()=>({ok:true,json:async()=>({initialized:false,authenticated:false,csrf:'',writerPaymentsSupported:true})}),
+  fetch:async()=>({ok:true,json:async()=>({initialized:false,authenticated:false,csrf:'',writerPaymentsSupported:true,customerReceiptsSupported:true,customerReceiptTotalsSupported:true})}),
   document:{querySelector:selector=>nodes.get(selector)||null,addEventListener(type,handler){if(!handlers.has(type))handlers.set(type,[]);handlers.get(type).push(handler);},createElement:node,body:node(),activeElement:null},
   window:{addEventListener(){}}});
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/business.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/files.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/ledger.js'),'utf8'),context);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/followups.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8'),context);
  return {context,nodes,handlers,run:code=>vm.runInContext(code,context)};
 }
@@ -362,7 +363,7 @@ test('action labels stay concise while full, half and related record actions rem
  for(const [action,text] of [['edit-paper','编辑'],['delete-paper','删除'],['detail-finance','收支'],['resubmit-paper','改投']]){
   const values=label(nodes.get('#results').innerHTML,action);assert.equal(values.length,8);assert.ok(values.every(value=>value===text));
  }
- run("state.papers[0].submissions=[];renderManagedPaperResults()");
+ run("filteredManagedPapers()[0].submissions=[];renderManagedPaperResults()");
  assert.ok(label(nodes.get('#results').innerHTML,'new-submission').includes('关联期刊'));
  run("state.view='customers';renderShell()");
  assert.deepEqual(label(nodes.get('#content').innerHTML,'new-customer'),['新增']);
@@ -466,7 +467,7 @@ test('all business editors and relationship detail cards render without saved pa
  run('openSubmissionEditor(state.papers[0],state.papers[0].submissions[0])');
  assert.match(nodes.get('#overlay-root').innerHTML,/留空保留原密码/);
  assert.match(nodes.get('#overlay-root').innerHTML,/name="endedAt"/);
- assert.match(nodes.get('#overlay-root').innerHTML,/name="publishedAt"/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="expectedPublishedAt"/);
  run('openCustomerEditor(state.customers[0])');
  assert.match(nodes.get('#overlay-root').innerHTML,/name="organization"/);
  const cards=run('submissionCards(state.papers[0])');assert.match(cards,/••••••••••/);
@@ -519,7 +520,7 @@ test('late submission loads cannot replace a newer editor or reopen a closed dra
 });
 
 test('late paper and customer loads cannot reopen closed drawers or replace newer screens',async()=>{
- for(const action of ['detail','edit-paper','writer-payment','customer-detail','delete-paper'])for(const next of ['close','new','other']){
+ for(const action of ['detail','edit-paper','writer-payment','customer-payment','customer-detail','delete-paper'])for(const next of ['close','new','other']){
   const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
   run("globalThis.pending=[];api=url=>new Promise(resolve=>pending.push(resolve));state.view='papers';");
   const loading=clickAction(handlers,{action,id:action==='customer-detail'?'customer-1':'paper-0',type:'outgoing_deposit'});
@@ -720,7 +721,7 @@ test('resubmitting full and half papers appends a submission and retains the sel
   const html=nodes.get('#overlay-root').innerHTML;
   assert.match(html,/id="drawer-title">论文改投<\/h2>/);assert.match(html,/value="paper-0" selected/);
   assert.match(html,/name="title"[^>]*value="原投稿题目"/);
-  for(const name of ['journal','submissionAccount','submissionPassword','submittedAt','endedAt','publishedAt'])assert.match(html,new RegExp(`name="${name}"[^>]*value=""`));
+  for(const name of ['journal','submissionAccount','submissionPassword','submittedAt','endedAt','expectedPublishedAt'])assert.match(html,new RegExp(`name="${name}"[^>]*value=""`));
   assert.match(html,/<option value="待投稿" selected>/);
   assert.equal(run('state.drawer.submission'),null);assert.equal(run('state.drawer.resubmit'),true);
   formValues(run,{title:'原投稿题目',journal:'改投新期刊',status:'待投稿',submissionAccount:'',submissionPassword:'',submittedAt:'',endedAt:'',publishedAt:''});
@@ -847,7 +848,7 @@ test('full and half paper rows delete only the confirmed paper using its latest 
   const confirmation=nodes.get('#overlay-root').innerHTML;
   assert.match(confirmation,/待删除论文 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(confirmation,/LW-2026-0/);assert.match(confirmation,/1 次投稿/);assert.match(confirmation,/0 笔收支/);
-  assert.match(confirmation,/客户和其他记录保留/);assert.match(confirmation,/此操作无法撤销/);
+  assert.match(confirmation,/客户和其他论文保留/);assert.match(confirmation,/此操作无法撤销/);
   assert.equal(confirmation.includes('写作安排'),serviceType==='full');
   await clickAction(handlers,{action:'cancel-modal'});
   assert.equal(run('deletions.length'),0);assert.equal(run('state.papers.length'),2);
@@ -1101,7 +1102,7 @@ test('customer deposit fields calculate the balance and prevent saving a deposit
   run(`state.papers[0].serviceType='${serviceType}';state.papers[0].contractCents=300010;state.papers[0].contractDepositCents=100005;openEditor(state.papers[0]);`);
   const html=nodes.get('#overlay-root').innerHTML;
   assert.match(html,/name="contractDepositAmount"[^>]*value="1000.05"/);
-  assert.match(html,/name="contractBalanceAmount"[^>]*value="2000.05"[^>]*readonly/);
+  assert.match(html,/name="customerPendingBalance"[^>]*readonly/);
   assert.equal(html.includes('name="writerDepositAmount"'),serviceType==='full');
  }
  run("state.drawer={kind:'edit',paper:null};globalThis.calls=[];api=async(url,options)=>{calls.push({url,options});return state.papers[0];};finishSave=async()=>{};");
@@ -1128,14 +1129,14 @@ test('customer payment terms appear in details and exports independently from wr
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run("state.papers=state.papers.slice(0,1);Object.assign(state.papers[0],{contractCents:300010,contractDepositCents:100005,contractBalanceCents:200005});state.view='papers';renderShell();");
  const customerTerms=nodes.get('#results').innerHTML.match(/class="cell-sub paper-terms">([\s\S]*?)<\/div>/)[1];
- assert.match(customerTerms,/收款定金 ¥1,000.05/);assert.match(customerTerms,/尾款 ¥2,000.05/);
+ assert.match(customerTerms,/收款定金 ¥1,000.05/);assert.ok(!customerTerms.includes("写作定金"));
  assert.match(run('financeDetail(state.papers[0])'),/约定定金 ¥1,000.05 · 尾款 ¥2,000.05/);
  run("download=(name,blob)=>{globalThis.exported={name,blob};};exportManagedPapers()");
  let csv=await run('exported.blob').text();assert.match(csv,/收款定金（元）/);assert.match(csv,/收款尾款（元）/);assert.match(csv,/"3000.1","1000.05","2000.05"/);
  run("state.financeType='balances';exportFinance()");csv=await run('exported.blob').text();assert.match(csv,/"1000.05","2000.05"/);
  run("delete state.papers[0].contractDepositCents;openEditor(state.papers[0])");
  assert.match(nodes.get('#overlay-root').innerHTML,/name="contractDepositAmount"[^>]*value="0.00"/);
- assert.match(nodes.get('#overlay-root').innerHTML,/name="contractBalanceAmount"[^>]*value="3000.10"/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="customerPendingBalance"/);
 });
 
 test('zero payments and invalid email formats receive specific inline errors',async()=>{
@@ -1854,7 +1855,7 @@ test('paper rows retain writing and financial data with labeled cells and one co
  const html=nodes.get('#results').innerHTML;
  const rows=[...html.match(/<tbody>([\s\S]*?)<\/tbody>/)[1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map(match=>match[1]);
  assert.equal(rows.length,2);
- const columnLabels=['论文题目 / 编号','客户 / 作者','关联期刊','写作安排 / 进度','服务费用 / 稿酬','写作付款','操作'];
+ const columnLabels=['论文题目 / 编号','客户 / 作者','关联期刊','写作安排 / 进度','服务费用','写作费用','操作'];
  for(const [index,row] of rows.entries()){
   const cells=[...row.matchAll(/<td\b([^>]*)>([\s\S]*?)<\/td>/g)];
   assert.equal(cells.length,8);assert.deepEqual(cells.slice(1).map(cell=>cell[1].match(/data-label="([^"]+)"/)[1]),columnLabels);
@@ -1865,11 +1866,11 @@ test('paper rows retain writing and financial data with labeled cells and one co
   assert.ok(!actions.includes('cell-sub'));assert.ok(!row.includes('private-secret-42'));
  }
  const fullText=rows[0].replace(/<[^>]*>/g,' ').replace(/\s+/g,' ');
- for(const value of ['写作人员甲','已交稿','开始 2026.01.02','预计交稿 2026.01.10','实际交稿 2026.01.12','写作时长 10 天','服务费 ¥1,000,000.00','收款定金 ¥200,000.00','尾款 ¥800,000.00','稿酬 ¥300,000.00','写作定金 ¥50,000.00','尾款 ¥250,000.00','已付定金 ¥50,000.00','已付尾款 ¥100,000.00','待付稿酬 ¥150,000.00'])assert.ok(fullText.includes(value),value);
+ for(const value of ['写作人员甲','已交稿','开始 2026.01.02','预计交稿 2026.01.10','实际交稿 2026.01.12','写作时长 10 天','服务费 ¥1,000,000.00','收款定金 ¥200,000.00','稿酬 ¥300,000.00','写作定金 ¥50,000.00','尾款 ¥250,000.00','已付定金 ¥50,000.00','已付尾款 ¥100,000.00','待付稿酬 ¥150,000.00'])assert.ok(fullText.includes(value),value);
  assert.ok(!fullText.includes('已逾期'));
  assert.ok(!rows[0].includes('<script>alert(1)</script>'));assert.match(rows[0],/&lt;script&gt;/);
  assert.match(rows[1],/客户供稿/);assert.match(rows[1],/无需安排写作/);assert.match(rows[1],/无需写作稿酬/);
- assert.ok(!rows[1].includes('paper-writing-dates'));assert.ok(!rows[1].includes('paper-payment-list'));
+ assert.ok(!rows[1].includes('paper-writing-dates'));assert.match(rows[1],/已收定金/);assert.ok(!rows[1].includes('实际已付定金'));
  assert.equal([...html.matchAll(/<th\b/g)].length,8);assert.match(html,/<table class="managed-paper-table">/);
 });
 
@@ -2142,7 +2143,7 @@ test('writing fee entry separates terms, auto-calculated tail and newly recorded
  assert.match(html,/name="writerBalanceAmount"[^>]*value="1500.00"[^>]*readonly/);
  assert.match(html,/name="writerPaymentDeposit"[^>]*value="0.00"/);
  assert.match(html,/name="writerPaymentBalance"[^>]*value="0.00"/);
- assert.match(html,/已有记录：已付定金 ¥1,500.00/);
+ assert.match(html,/已付给写作老师：定金 ¥1,500.00/);
  assert.match(html,/下方只填本次新增金额/);
  assert.match(run('writingPaymentsCell(state.papers[0])'),/登记尾款/);
  assert.ok(!run('writingPaymentsCell(state.papers[0])').includes('登记定金'));
@@ -2245,12 +2246,16 @@ test('payment forms refuse to submit to an old service that cannot save the new 
 
 test('retrying a manuscript upload never repeats payments already saved with the paper',async()=>{
  const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
- run(`globalThis.saved={...state.papers[0],writerFeeCents:300000,writerDepositCents:150000,outgoing_depositCents:150000,outgoing_balanceCents:0};
+ run(`globalThis.saved={...state.papers[0],contractCents:200000,contractDepositCents:50000,contractReceivedCents:50000,transactions:[{type:"incoming_deposit",amountCents:50000}],writerFeeCents:300000,writerDepositCents:150000,outgoing_depositCents:150000,outgoing_balanceCents:0};
   globalThis.calls=[];globalThis.uploads=0;selectedManuscript=()=>({name:'稿件.pdf',size:10});
   uploadManuscript=async p=>{if(++uploads===1)throw new Error('上传中断');return {...p,version:p.version+1};};
   api=async(url,options)=>{calls.push(JSON.parse(options.body));return {...saved,version:calls.length};};finishSave=async()=>{};openWritingEditor();`);
  const fixture=validationForm(run,'paper-form',[
   {name:'title',label:'论文题目',value:'付款及稿件'},
+  {name:'contractAmount',label:'服务费用',type:'number',value:'2000'},
+  {name:'contractDepositAmount',label:'收款定金',type:'number',value:'500'},
+  {name:'customerReceivedDeposit',label:'已收定金',type:'number',value:'500'},
+  {name:'customerReceivedBalance',label:'已收尾款',type:'number',value:'0'},
   {name:'writerFee',label:'总稿酬',type:'number',value:'3000'},
   {name:'writerDepositAmount',label:'约定定金',type:'number',value:'1500'},
   {name:'writerPaymentDeposit',label:'本次定金',type:'number',value:'1500'},
@@ -2263,6 +2268,9 @@ test('retrying a manuscript upload never repeats payments already saved with the
  await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
  assert.equal(run('calls.length'),2);assert.equal(run('calls[0].writerPayments.length'),1);
  assert.equal(run('calls[1].writerPayments'),undefined);
+ assert.equal(fixture.controls.customerReceivedDeposit.value,'500.00');
+ assert.equal(run('calls[0].customerReceiptTotals.deposit'),'500');
+ assert.equal(run('calls[1].customerReceiptTotals.deposit'),'500.00');
 });
 
 test('overview acceptance and publication tabs match current status and explain automatic archive classification',async()=>{
@@ -2272,9 +2280,11 @@ test('overview acceptance and publication tabs match current status and explain 
  assert.match(html,/data-tab="accepted"[^>]*>已录用<span class="count">1<\/span>/);
  assert.match(html,/data-tab="published"[^>]*>已发表<span class="count">1<\/span>/);
  assert.match(html,/data-tab="finished"[^>]*>已归档<span class="count">2<\/span>/);
- assert.match(html,/分类按当前投稿状态统计/);assert.match(html,/已发表或已撤稿自动归入“已归档”/);assert.match(html,/已录用仍属于“进行中”/);
+ assert.match(html,/data-tab="active"[^>]*>进行中<span class="count">6<\/span>/);
+ assert.match(html,/<strong>6 篇<\/strong> 正在跟进/);
+ assert.match(html,/分类按当前投稿状态统计/);assert.match(html,/已发表或已撤稿自动归入“已归档”/);assert.match(html,/不计入“进行中”/);
  assert.ok(!html.includes('paper-source'));
- for(const [tab,expected] of [['accepted',[5]],['published',[6]],['finished',[6,8]],['active',[0,1,2,3,4,5,7]]]){
+ for(const [tab,expected] of [['accepted',[5]],['published',[6]],['finished',[6,8]],['active',[0,1,2,3,4,7]]]){
   run('state.page=4');await clickAction(handlers,{action:'tab',tab});
   assert.equal(run('state.page'),1);
   assert.deepEqual(JSON.parse(run('JSON.stringify(filteredPapers().map(p=>p.id))')),expected.map(i=>'paper-'+i));
@@ -2292,6 +2302,8 @@ test('overview acceptance and publication tabs match current status and explain 
 test('changing the current submission status updates overview outcomes and archive membership after refresh',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
  run(`state.papers=state.papers.slice(0,1);state.papers[0].status='已录用';state.view='records';globalThis.refreshedPapers=state.papers;api=async url=>url==='/api/papers'?refreshedPapers:state.customers;renderShell();`);
+ assert.match(nodes.get('#content').innerHTML,/data-tab="active"[^>]*>进行中<span class="count">0<\/span>/);
+ await clickAction(handlers,{action:'tab',tab:'active'});assert.equal(run('filteredPapers().length'),0);
  await clickAction(handlers,{action:'tab',tab:'accepted'});assert.equal(run('filteredPapers().length'),1);
  run("refreshedPapers=[{...state.papers[0],status:'已发表'}]");await clickAction(handlers,{action:'refresh'});
  assert.equal(run('filteredPapers().length'),0);assert.match(nodes.get('#content').innerHTML,/data-tab="accepted"[^>]*>已录用<span class="count">0<\/span>/);
@@ -2300,6 +2312,7 @@ test('changing the current submission status updates overview outcomes and archi
  run("refreshedPapers=[{...state.papers[0],status:'已投稿'}]");await clickAction(handlers,{action:'refresh'});
  assert.equal(run('filteredPapers().length'),0);
  await clickAction(handlers,{action:'tab',tab:'active'});assert.equal(run('filteredPapers().length'),1);
+ assert.match(nodes.get('#content').innerHTML,/data-tab="active"[^>]*>进行中<span class="count">1<\/span>/);
  await clickAction(handlers,{action:'tab',tab:'published'});assert.equal(run('filteredPapers().length'),0);
 });
 
@@ -2390,7 +2403,7 @@ test('finance annual summaries separate transaction year cash flows from paper y
  assert.match(html,/2026 年收支汇总/);assert.match(html,/按年度查看收付款/);
  assert.match(html,/累计收款[\s\S]*?¥1,200\.00/);
  assert.match(html,/累计付款[\s\S]*?¥230\.00/);
- assert.match(html,/净现金流[\s\S]*?¥970\.00/);
+ assert.match(html,/净利润[\s\S]*?¥970\.00/);
  assert.match(html,/待收服务费[\s\S]*?¥3,000\.00/);
  assert.match(html,/稿酬 ¥400\.00 · 版面费 ¥250\.00/);
  assert.match(html,/¥1,800\.00/);assert.match(html,/净利润（已结清）[\s\S]*?¥1,200\.00/);
@@ -2541,4 +2554,378 @@ test('resubmission saves the new journal and fee terms in one request, and activ
  assert.equal(run('feeCalls.length'),2);assert.equal(run('feeCalls[1].data.paperVersion'),12);
  assert.equal(run('feeCalls[1].data.publicationFeeMode'),'pending');
  assert.equal(run('feeCalls[1].data.publicationFeeAmount'),undefined);
+});
+
+
+test('customer receipts remain separate from writer payments and account for reversals',()=>{
+ const {run}=app();seedBusiness(run);
+ run(`Object.assign(state.papers[0],{contractCents:2200000,contractDepositCents:200000,contractReceivedCents:50000,receivableCents:2150000,
+  writerFeeCents:1400000,writerDepositCents:150000,outgoing_depositCents:150000,
+  transactions:[{type:'incoming_deposit',amountCents:80000},{type:'incoming_deposit',amountCents:30000,reversalOf:'old'},
+   {type:'outgoing_deposit',amountCents:150000}]});`);
+ assert.equal(run('customerReceiptTotals(state.papers[0]).deposit'),50000);
+ assert.equal(run('customerReceiptTotals(state.papers[0]).balance'),0);
+ const row=run('managedPaperRow(state.papers[0],0)');
+ assert.match(row,/data-label="服务费用"/);assert.match(row,/已收定金/);assert.match(row,/已收尾款/);
+ assert.match(row,/待收尾款/);assert.match(row,/data-label="写作费用"/);assert.match(row,/实际已付定金/);
+ assert.match(row,/data-action="customer-payment"[^>]*data-type="incoming_deposit"/);
+ run("state.papers[0].serviceType='half'");
+ assert.match(run('managedPaperRow(state.papers[0],0)'),/登记收款定金/);
+ assert.doesNotMatch(run('managedPaperRow(state.papers[0],0)'),/实际已付定金/);
+ run("state.papers[0].serviceStatus='terminated'");
+ assert.equal(run('customerReceiptActions(state.papers[0])'),'');
+});
+
+test('customer deposit shortcut opens actual receipt form and saves an incoming transaction',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`Object.assign(state.papers[0],{contractCents:2200000,contractDepositCents:200000,contractReceivedCents:50000,receivableCents:2150000,
+  transactions:[{type:'incoming_deposit',amountCents:50000}]});
+  globalThis.calls=[];api=async(url,options={})=>{if(options.method)calls.push({url,data:JSON.parse(options.body)});return state.papers[0];};finishSave=async()=>{};`);
+ await clickAction(handlers,{action:'customer-payment',id:'paper-0',type:'incoming_deposit'});
+ const html=nodes.get('#overlay-root').innerHTML;
+ assert.match(html,/登记已收定金/);assert.match(html,/<option value="incoming_deposit" selected>/);
+ assert.match(html,/name="amount"[^>]*value="1500.00"/);
+ const fixture=validationForm(run,'transaction-form',[
+  {name:'type',label:'收支类型',value:'incoming_deposit',tagName:'SELECT'},
+  {name:'amount',label:'金额',type:'number',value:'1500.01'},
+  {name:'date',label:'收款日期',type:'date',value:'2026-01-02'},
+ ]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),0);
+ fixture.controls.amount.value='1500';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.equal(run('calls[0].data.type'),'incoming_deposit');
+ assert.equal(run('calls[0].data.amount'),'1500');
+ run(`state.papers[0].transactions.push({type:'incoming_deposit',amountCents:150000});state.papers[0].contractReceivedCents=200000;`);
+ assert.doesNotMatch(run('customerReceiptActions(state.papers[0])'),/data-type="incoming_deposit"/);
+ await clickAction(handlers,{action:'customer-payment',id:'paper-0',type:'incoming_balance'});
+ assert.match(nodes.get('#overlay-root').innerHTML,/登记已收尾款/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/name="amount"[^>]*value="20000.00"/);
+});
+
+
+
+test('service fee section has exactly five fields and keeps writing fees separate',()=>{
+ const {run,nodes}=app();seedBusiness(run);run("openPaperEditor(state.papers[0],'full')");
+ const html=nodes.get('#overlay-root').innerHTML;
+ const service=html.match(/<section class="fee-entry-section" aria-label="服务费用">([\s\S]*?)<\/section>/)[1];
+ assert.deepEqual([...service.matchAll(/name="([^"]+)"/g)].map(m=>m[1]),['contractAmount','contractDepositAmount','customerReceivedDeposit','customerPendingBalance','customerReceivedBalance']);
+ assert.ok(!service.includes('type="date"'));assert.ok(!service.includes('type="checkbox"'));assert.ok(!service.includes('本次'));
+ assert.ok(html.includes('aria-label="写作费用"'));assert.ok(html.includes('name="writerPaymentDeposit"'));
+ const row=run('managedPaperRow(state.papers[0],0)');
+ const serviceCell=row.match(/<td class="paper-costs"[^>]*>([\s\S]*?)<\/td>/)[1];
+ const writingCell=row.match(/<td class="paper-payments"[^>]*>([\s\S]*?)<\/td>/)[1];
+ assert.match(serviceCell,/约定收款定金/);assert.match(serviceCell,/已收定金/);assert.match(serviceCell,/待收尾款/);
+ assert.ok(!serviceCell.includes('writer-payment'));assert.ok(!writingCell.includes('customer-payment'));
+ run("openPaperEditor(null,'half')");assert.ok(nodes.get('#overlay-root').innerHTML.includes('name="customerReceivedDeposit"'));
+ assert.ok(!nodes.get('#overlay-root').innerHTML.includes('name="writerPaymentDeposit"'));
+});
+
+test('five-field service form calculates outstanding total and submits cumulative amounts',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.customerReceiptTotalsSupported=true;state.drawer={kind:'edit',paper:state.papers[0]};
+ Object.assign(state.papers[0],{contractCents:1800000,contractDepositCents:200000,contractReceivedCents:200000,transactions:[{type:'incoming_deposit',amountCents:200000}]});
+ globalThis.calls=[];api=async(url,options={})=>{calls.push({url,data:JSON.parse(options.body)});return {...state.papers[0],contractReceivedCents:500000,transactions:[{type:'incoming_deposit',amountCents:200000},{type:'incoming_balance',amountCents:300000}]};};finishSave=async()=>{};`);
+ const fixture=validationForm(run,'paper-form',[
+  {name:'title',label:'论文题目',value:'五项费用'},
+  {name:'contractAmount',label:'服务费用',type:'number',value:'18000'},
+  {name:'contractDepositAmount',label:'约定定金',type:'number',value:'2000'},
+  {name:'customerReceivedDeposit',label:'已收定金',type:'number',value:'2000'},
+  {name:'customerPendingBalance',label:'待收尾款',type:'number',value:'0',readOnly:true},
+  {name:'customerReceivedBalance',label:'已收尾款',type:'number',value:'3000'},
+ ]);
+ await Promise.all(handlers.get('input').map(fn=>fn({target:fixture.controls.customerReceivedBalance})));
+ assert.equal(fixture.controls.customerPendingBalance.value,'13000.00');
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);assert.equal(run('calls[0].data.customerReceiptTotals.deposit'),'2000');
+ assert.equal(run('calls[0].data.customerReceiptTotals.balance'),'3000');assert.equal(run('calls[0].data.customerReceipts'),undefined);
+ assert.equal(fixture.controls.customerReceivedDeposit.value,'2000.00');assert.equal(fixture.controls.customerReceivedBalance.value,'3000.00');
+ fixture.controls.customerReceivedDeposit.value='2000.01';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),1);
+ assert.match(fixture.controls.customerReceivedDeposit.inlineError.textContent,/不能超过约定定金/);
+ fixture.controls.customerReceivedDeposit.value='-1';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),1);
+});
+
+test('cumulative service form blocks unsupported servers and invalid decimal precision',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run(`state.customerReceiptTotalsSupported=false;state.drawer={kind:'edit',paper:null};globalThis.calls=[];api=async(...args)=>{calls.push(args);return {};};`);
+ const fixture=validationForm(run,'paper-form',[
+  {name:'title',label:'论文',value:'小数收款'},
+  {name:'contractAmount',label:'服务费',type:'number',value:'0.30'},
+  {name:'contractDepositAmount',label:'约定定金',type:'number',value:'0.10'},
+  {name:'customerReceivedDeposit',label:'已收定金',type:'number',value:'0.10'},
+  {name:'customerPendingBalance',label:'待收尾款',type:'number',value:'0.20',readOnly:true},
+  {name:'customerReceivedBalance',label:'已收尾款',type:'number',value:'0'},
+ ]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),0);assert.match(fixture.summary.textContent,/重启服务/);
+ fixture.controls.customerReceivedDeposit.value='0.101';
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));assert.equal(run('calls.length'),0);assert.match(fixture.controls.customerReceivedDeposit.inlineError.textContent,/最多两位小数/);
+});
+
+
+test('paper deletion remains available with transactions and after termination',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ for(const status of ['active','terminated']){
+  run(`state.papers[0].serviceStatus='${status}';state.drawer={kind:'detail',paper:state.papers[0],tab:'basic'};renderDetail();`);
+  assert.ok(!nodes.get('#overlay-root').innerHTML.includes('data-action="delete-paper"'));
+  assert.match(run('managedPaperRow(state.papers[0],0)'),/data-action="delete-paper"/);
+ }
+ run(`api=async()=>state.papers[0];`);
+ await clickAction(handlers,{action:'delete-paper',id:'paper-0'});
+ assert.match(nodes.get('#overlay-root').innerHTML,/笔收支及财务记录/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/删除会清除该论文的全部数据/);
+});
+
+
+test('author biography is editable in full and half paper forms and safely shown in details',()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ run(String.raw`state.papers[0].authorBio='张发栋、1983-6、男、汉族\n研究方向：建筑施工 <script>bad</script>';`);
+ for(const type of ['full','half']){
+  run(`state.papers[0].serviceType='${type}';openPaperEditor(state.papers[0],'${type}')`);
+  const html=nodes.get('#overlay-root').innerHTML;
+  assert.match(html,/<textarea[^>]*name="authorBio"/);assert.match(html,/maxlength="2000"/);
+  assert.ok(html.indexOf('name="authorBio"')>html.indexOf('name="customerId"'));
+  assert.ok(html.indexOf('name="authorBio"')<html.indexOf('name="followUpAt"'));
+  assert.match(html,/研究方向：建筑施工 &lt;script&gt;bad&lt;\/script&gt;/);
+  assert.match(run('basicDetail(state.papers[0])'),/作者简介/);
+ }
+});
+
+
+test('logout requires confirmation, cancellation keeps login and failure allows retry',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.authenticated=true;state.csrf='session-token';globalThis.calls=[];globalThis.rejectLogout=false;api=async(url,options)=>{calls.push(url);if(rejectLogout)throw new Error('退出失败');return {};};`);
+ await clickAction(handlers,{action:'logout'});
+ assert.match(nodes.get('#overlay-root').innerHTML,/确认退出系统/);assert.match(nodes.get('#overlay-root').innerHTML,/确认退出/);
+ assert.equal(run('calls.length'),0);assert.equal(run('state.authenticated'),true);
+ await clickAction(handlers,{action:'cancel-modal'});
+ assert.equal(run('calls.length'),0);assert.equal(run('state.csrf'),'session-token');
+ await clickAction(handlers,{action:'logout'});run('rejectLogout=true');
+ await clickAction(handlers,{action:'confirm-modal'});
+ assert.equal(run('state.authenticated'),true);assert.equal(run('state.csrf'),'session-token');
+ run('rejectLogout=false');await clickAction(handlers,{action:'confirm-modal'});
+ assert.equal(run('calls.filter(url=>url==="/api/logout").length'),2);
+ assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');
+ assert.equal(run('state.papers.length'),0);assert.match(nodes.get('#root').innerHTML,/登录系统/);
+});
+
+
+test('paper service summary shows received deposits alongside total and remaining fees',()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ run(`state.papers=[{...state.papers[0],serviceType:'half',contractCents:2200000,contractReceivedCents:200000,receivableCents:2000000,receivedCents:250000,otherIncomeCents:50000,transactions:[{type:'incoming_deposit',amountCents:200000},{type:'incoming_other',amountCents:50000}]}];renderPaperManagement();`);
+ const html=nodes.get('#content').innerHTML;
+ assert.match(html,/待收服务费[\s\S]*?¥20,000.00/);
+ assert.match(html,/应收总额 <strong>¥22,000.00/);
+ assert.match(html,/已收定金 <strong>¥2,000.00/);
+ assert.ok(!html.includes('已收定金 <strong>¥2,500.00'));
+});
+
+
+test('acceptance enables previously disabled expected date and requires acceptance date',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ const fixture=validationForm(run,'submission-form',[
+  {name:'status',label:'投稿状态',tagName:'SELECT',value:'审稿中'},
+  {name:'submittedAt',label:'投稿日期',type:'date',value:'2026-01-01'},
+  {name:'endedAt',label:'录用日期',type:'date',value:''},
+  {name:'expectedPublishedAt',label:'预计发表日期',type:'date',value:''},
+ ]);
+ await Promise.all(handlers.get('change').map(fn=>fn({target:fixture.controls.status})));
+ assert.equal(fixture.controls.expectedPublishedAt.disabled,false);
+ fixture.controls.status.value='已录用';
+ await Promise.all(handlers.get('change').map(fn=>fn({target:fixture.controls.status})));
+ assert.equal(fixture.controls.expectedPublishedAt.disabled,false);
+ assert.equal(fixture.controls.endedAt.required,true);
+ fixture.controls.endedAt.value='2026-01-02';
+ await Promise.all(handlers.get('change').map(fn=>fn({target:fixture.controls.endedAt})));
+ assert.equal(fixture.controls.expectedPublishedAt.min,'2026-01-03');
+ fixture.controls.status.value='审稿中';
+ await Promise.all(handlers.get('change').map(fn=>fn({target:fixture.controls.status})));
+ assert.equal(fixture.controls.endedAt.required,false);
+ assert.equal(fixture.controls.expectedPublishedAt.disabled,false);
+});
+
+
+test('overview payment total breaks down actual publication, writing and other expenses',()=>{
+ const {run}=app();seed(run);
+ run(`state.papers=[{...state.papers[0],paidCents:100000,transactions:[{type:'outgoing_publication',amountCents:50000},{type:'outgoing_deposit',amountCents:50000}]}];`);
+ const html=run('stats()');
+ assert.match(html,/累计已付款[\s\S]*?¥1,000.00/);
+ assert.match(html,/版面费支出 <strong>¥500.00/);assert.match(html,/写作费支出 <strong>¥500.00/);
+ assert.ok(!run('overviewExpenseBreakdown(state.papers)').includes('其他支出'));
+ run(`state.papers[0].transactions.push({type:'outgoing_publication',amountCents:10000,reversalOf:'original'},{type:'incoming_publication_refund',amountCents:5000},{type:'outgoing_refund',amountCents:2000});`);
+ const corrected=run('overviewExpenseBreakdown(state.papers)');
+ assert.match(corrected,/版面费支出 <strong>¥400.00/);assert.ok(!corrected.includes('退还客户款'));
+});
+
+
+test('cancelling submission editing returns to its originating list or detail without requests',async()=>{
+ for(const inDetail of [false,true]){
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+  run(`state.view='submissions';renderShell();globalThis.writes=[];api=async(url,options={})=>{if(options.method)writes.push(url);return state.papers[0];};globalThis.before=JSON.stringify(state.papers);`);
+  if(inDetail)run("state.drawer={kind:'detail',paper:state.papers[0],tab:'submissions'};renderDetail()");
+  await clickAction(handlers,{action:'edit-submission',paperId:'paper-0',id:'submission-paper-0'});
+  assert.equal(run('state.drawer.kind'),'submission-edit');
+  await clickAction(handlers,{action:'cancel-submission'});
+  assert.equal(run('writes.length'),0);assert.equal(run('JSON.stringify(state.papers)'),run('before'));
+  if(inDetail){assert.equal(run('state.drawer.kind'),'detail');assert.equal(run('state.drawer.tab'),'submissions');}
+  else{assert.equal(run('state.drawer'),null);assert.equal(nodes.get('#overlay-root').innerHTML,'');assert.equal(run('state.view'),'submissions');}
+ }
+});
+
+
+test('follow-up rows offer editing and completion while paper footer remains view-only',()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ run("state.view='followups';state.tab='all';renderShell()");
+ const rows=nodes.get('#results').innerHTML;
+ assert.match(rows,/<th>跟进日期 \/ 事项<\/th>/);
+ assert.match(rows,/<th>备注 \/ 处理结果<\/th><th>操作<\/th>/);
+ assert.match(rows,/data-action="edit-followup"/);
+ assert.match(rows,/data-action="complete-followup"/);
+ assert.match(rows,/class="follow-up-row-actions" role="group"/);
+ assert.match(rows,/class="text-btn" data-action="edit-followup"/);
+ assert.match(rows,/class="text-btn" data-action="complete-followup"/);
+ assert.match(rows,/class="text-btn" data-action="followup-task-detail"/);
+ assert.ok(!rows.includes('class="btn small"'));
+ run("state.drawer={kind:'detail',paper:state.papers[0],tab:'basic'};renderDetail()");
+ const footer=nodes.get('#overlay-root').innerHTML.match(/<footer[\s\S]*?<\/footer>/)[0];
+ assert.match(footer,/data-action="close"/);
+ for(const action of ['add-transaction','delete-paper','edit-paper'])assert.ok(!footer.includes(`data-action="${action}"`));
+});
+
+test('record actions consistently use leading icons and borderless text buttons',()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ for(const view of ['records','papers','customers','submissions','followups','finance']){
+  run(`state.view='${view}';state.tab='all';state.financeType='balances';renderShell()`);
+  const buttons=[...nodes.get('#results').innerHTML.matchAll(/<button\b([^>]*class="text-btn[^>]*)>([\s\S]*?)<\/button>/g)]
+   .filter(([,attributes])=>/data-action="(?:detail|detail-finance|customer-detail|submission-detail|edit-paper|delete-paper|edit-submission|delete-submission|resubmit-paper|new-submission|edit-followup|complete-followup|reopen-followup|followup-task-detail)"/.test(attributes)&&!attributes.includes('customer-link'));
+  assert.ok(buttons.length,view);
+  for(const [,attributes,content] of buttons)assert.match(content,/^<svg class="icon"/,view+' '+attributes);
+ }
+ assert.match(run("btn('reverse-transaction','冲销','refresh','small')"),/^<button[^>]*class="text-btn small"[^>]*><svg/);
+ assert.match(run("btn('delete-submission','删除','trash','small danger')"),/class="text-btn small danger"/);
+ assert.match(run("btn('new-paper','新增','plus','primary')"),/class="btn primary"/);
+ assert.match(run("btn('close','关闭')"),/class="btn "/);
+});
+
+test('follow-up detail shows only the selected task and keeps its context when cancelling an edit',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.view='followups';state.papers=state.papers.slice(0,1);
+ const stamp='2026-01-01T00:00:00Z';
+ state.papers[0].followUps=[
+  {id:'selected-task',content:'核对收件地址 <script>',date:today(),status:'pending',note:'联系客户确认 <img>',createdAt:stamp,updatedAt:stamp},
+  {id:'other-task',content:'另一个事项不应展示',date:today(),status:'completed',note:'另一个事项备注',closedAt:stamp}];
+ state.papers[0].followUpHistory=[
+  {taskId:'selected-task',content:'最初的地址核对',date:today(),status:'pending',note:'第一次沟通',at:stamp},
+  {taskId:'other-task',content:'其他历史不应展示',date:today(),status:'completed',note:'其他记录',at:stamp}];
+ api=async()=>state.papers[0];`);
+ await clickAction(handlers,{action:'followup-task-detail',id:'paper-0',taskId:'selected-task'});
+ const html=nodes.get('#overlay-root').innerHTML;
+ assert.equal(run('state.drawer.kind'),'followup-detail');
+ assert.match(html,/跟进事项详情/);
+ assert.match(html,/核对收件地址 &lt;script&gt;/);
+ assert.match(html,/联系客户确认 &lt;img&gt;/);
+ assert.match(html,/最初的地址核对/);
+ assert.match(html,/第一次沟通/);
+ assert.ok(!html.includes('另一个事项不应展示'));
+ assert.ok(!html.includes('其他历史不应展示'));
+ assert.match(html,/data-action="followup-detail"/);
+ assert.match(html,/data-action="edit-followup" data-id="paper-0" data-task-id="selected-task"/);
+ await clickAction(handlers,{action:'edit-followup',id:'paper-0',taskId:'selected-task'});
+ assert.equal(run('state.drawer.kind'),'followup-edit');
+ await clickAction(handlers,{action:'cancel-followup'});
+ assert.equal(run('state.drawer.kind'),'followup-detail');
+ assert.equal(run('state.drawer.task.id'),'selected-task');
+ assert.match(nodes.get('#overlay-root').innerHTML,/核对收件地址 &lt;script&gt;/);
+});
+
+test('late follow-up detail responses cannot reopen a closed drawer',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.view='followups';api=()=>new Promise(resolve=>{globalThis.resolveTaskDetail=resolve});`);
+ const pending=run("openFollowUpTaskDetail('paper-0','selected-task')");
+ run("closeOverlay();resolveTaskDetail({...state.papers[0],followUps:[{id:'selected-task',content:'旧响应',date:today(),status:'pending'}]})");
+ await pending;
+ assert.equal(run('state.drawer'),null);
+ assert.equal(nodes.get('#overlay-root').innerHTML,'');
+});
+
+test('independent tasks keep completed history and remind about new requests on published papers',async()=>{
+ const {run,nodes}=app();seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,1);state.papers[0].status='已发表';
+ state.papers[0].followUps=[
+  {id:'done',content:'确认修改意见',date:today(),status:'completed',note:'客户已确认',closedAt:new Date().toISOString()},
+  {id:'new',content:'作者新增要求 <script>',date:today(),status:'pending',note:'增加图表'},
+  {id:'next',content:'下次回访',date:'2099-01-01',status:'in_progress',note:''}];
+ state.view='followups';state.tab='all';renderShell();`);
+ assert.equal(run('followUpPlans().length'),2);
+ assert.equal(run('filteredFollowUps().length'),2);
+ assert.match(nodes.get('#results').innerHTML,/作者新增要求 &lt;script&gt;/);
+ assert.ok(!nodes.get('#results').innerHTML.includes('客户已确认'));
+ run("state.tab='completed';renderContent()");
+ assert.equal(run('filteredFollowUps().length'),1);
+ assert.match(nodes.get('#results').innerHTML,/客户已确认/);
+ assert.match(nodes.get('#results').innerHTML,/data-action="reopen-followup"/);
+ run("state.tab='history';state.search='增加图表';renderResults()");
+ assert.equal(run('filteredFollowUps().length'),1);
+ run("state.search='';state.from=today();state.to=today();renderResults()");
+ assert.equal(run('filteredFollowUps().length'),2);
+ run("state.from='';state.to='';download=(name,blob)=>{globalThis.followUpExport={name,blob}};exportPapers()");
+ const csv=await run('followUpExport.blob').text();
+ assert.match(csv,/客户已确认/);assert.match(csv,/已完成/);assert.match(csv,/作者新增要求/);
+ run("state.drawer={kind:'detail',paper:state.papers[0],tab:'followups'};renderDetail()");
+ assert.match(nodes.get('#overlay-root').innerHTML,/data-action="new-followup"/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/查看处理历史/);
+});
+
+test('follow-up editor submits its original task identity and version and retains failed input',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.authenticated=true;state.view='followups';state.papers=state.papers.slice(0,1);
+ state.papers[0].followUps=[{id:'task-1',content:'客户提出修改要求',date:today(),status:'pending',note:'原备注'}];
+ globalThis.calls=[];api=async(url,options={})=>{if(!options.method)return state.papers[0];calls.push({url,options});throw new Error('版本冲突，请重新打开');};`);
+ await clickAction(handlers,{action:'complete-followup',id:'paper-0',taskId:'task-1'});
+ assert.match(nodes.get('#overlay-root').innerHTML,/id="followup-form"/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/value="completed" selected/);
+ assert.equal(run('isEditingDrawer()'),true);
+ const fixture=validationForm(run,'followup-form',[
+  {name:'content',label:'跟进事项',value:'客户提出修改要求',required:true},
+  {name:'date',label:'跟进日期',value:run('today()'),type:'date',required:true},
+  {name:'status',label:'事项状态',value:'completed',required:true},
+  {name:'note',label:'备注',value:'处理结果：已补充图表'}]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);
+ assert.equal(run('calls[0].url'),'/api/papers/paper-0/followups/task-1');
+ const payload=JSON.parse(run('calls[0].options.body'));
+ assert.equal(payload.status,'completed');assert.equal(payload.version,1);
+ assert.equal(payload.note,'处理结果：已补充图表');
+ assert.equal(fixture.controls.note.value,'处理结果：已补充图表');
+ assert.match(fixture.summary.textContent,/版本冲突/);
+ assert.equal(fixture.submit.disabled,false);
+});
+
+test('new requests save under the selected paper and keep completed tasks visible in details',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.authenticated=true;state.view='followups';state.papers=state.papers.slice(0,1);
+ state.papers[0].followUps=[{id:'finished',content:'已处理的要求',date:today(),status:'completed',note:'已确认',closedAt:new Date().toISOString()}];
+ globalThis.calls=[];api=async(url,options={})=>{
+  if(!options.method)return state.papers[0];
+  calls.push({url,options});const data=JSON.parse(options.body);
+  return {...state.papers[0],version:2,followUpAt:data.date,followUpReason:data.content,followUps:[...state.papers[0].followUps,{id:'new-request',...data}],followUpHistory:[]};
+ };`);
+ await clickAction(handlers,{action:'new-followup'});
+ const fixture=validationForm(run,'followup-form',[
+  {name:'paperId',label:'关联论文',value:'paper-0',required:true},
+  {name:'content',label:'跟进事项',value:'作者提出补充图片',required:true},
+  {name:'date',label:'跟进日期',value:run('today()'),type:'date',required:true},
+  {name:'status',label:'事项状态',value:'pending',required:true},
+  {name:'note',label:'备注',value:'等待原图'}]);
+ await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+ assert.equal(run('calls.length'),1);
+ assert.equal(run('calls[0].url'),'/api/papers/paper-0/followups');
+ assert.equal(run('calls[0].options.method'),'POST');
+ assert.equal(run('state.papers[0].followUps.length'),2);
+ assert.equal(run('followUpPlans().length'),1);
+ assert.equal(run('state.drawer.tab'),'followups');
+ assert.match(nodes.get('#overlay-root').innerHTML,/已处理的要求/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/作者提出补充图片/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/等待原图/);
 });

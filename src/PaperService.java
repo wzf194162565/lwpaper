@@ -9,21 +9,28 @@ public final class PaperService {
     private final BusinessStore vault;
     static final Set<String> STATUSES = Set.of("草稿", "待投稿", "已投稿", "审稿中", "修改中", "已录用", "已发表", "已拒稿", "已撤稿");
     static final Set<String> TYPES = Set.of("incoming_deposit", "incoming_balance", "incoming_other", "outgoing_deposit", "outgoing_balance", "outgoing_other", "incoming_settlement", "outgoing_refund", "outgoing_settlement", "incoming_writer_refund", "outgoing_publication", "incoming_publication_refund");
-    private static final List<String> FIELDS = List.of("title", "authors", "customer", "writer", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "submittedAt", "followUpAt", "followUpReason", "status", "notes");
+    private static final List<String> FIELDS = List.of("title", "authors", "authorBio", "customer", "writer", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "submittedAt", "followUpAt", "followUpReason", "status", "notes");
     public PaperService(BusinessStore vault) { this.vault = vault; }
 
+    private void ensureCodes() {
+        if(!PaperCodes.needed(vault.read()))return;
+        try { vault.mutate(state->{PaperCodes.migrate(state);return null;}); }
+        catch(RuntimeException e){throw e;}catch(Exception e){throw new IllegalStateException("论文编号更新失败",e);}
+    }
     public List<Object> list() {
+        ensureCodes();
         Map<String, Object> state = vault.read();
         List<Object> result = new ArrayList<>();
         for (Object item : Json.array(state.get("papers"))) result.add(publicPaper(Json.object(item), false, state));
         result.sort(Comparator.comparing((Object o) -> Main.string(Json.object(o), "updatedAt")).reversed());
         return result;
     }
-    public Map<String, Object> get(String id) { Map<String, Object> state = vault.read(); return publicPaper(find(state, id), true, state); }
+    public Map<String, Object> get(String id) { ensureCodes(); Map<String, Object> state = vault.read(); return publicPaper(find(state, id), true, state); }
     public Map<String, Object> credentials(String id) { return Map.of("password", Main.string(find(vault.read(), id), "submissionPassword")); }
 
     public Map<String, Object> create(Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
+            PaperCodes.migrate(state);
             List<Object> records = Json.array(state.get("papers"));
             if (records.size() >= 10_000) throw new ApiException(400, "本机版最多保存 10000 篇论文");
             Map<String, Object> paper = fields(input, null);
@@ -37,12 +44,14 @@ public final class PaperService {
                     throw new ApiException(409, "这篇论文已保存，请刷新列表核对，避免重复登记付款");
             }
             paper.put("id", id);
-            paper.put("code", "LW-" + LocalDate.now().getYear() + "-" + id.substring(0, 8).toUpperCase(Locale.ROOT));
+            paper.put("code", "");
             paper.put("version", 1); paper.put("createdAt", now()); paper.put("updatedAt", now());
             paper.put("transactions", new ArrayList<>());
             paper.put("history", new ArrayList<>(List.of(event(paper, "建立论文档案"))));
             BusinessService.initializePaper(state, paper, input);
-            PublicationFees.initialize(paper);WriterPayments.apply(paper, input,FinancialLedger.actor(vault));
+            paper.put("code",PaperCodes.next(state,paper));
+            PublicationFees.initialize(paper);WriterPayments.apply(paper, input,FinancialLedger.actor(vault));CustomerReceipts.apply(paper,input,FinancialLedger.actor(vault));
+            FollowUps.initialize(paper);
             records.add(paper);
             return publicPaper(paper, true, state);
         });
@@ -52,9 +61,12 @@ public final class PaperService {
         return vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             ServiceTermination.requireActive(paper);
+            FollowUps.initialize(paper);
+            String oldFollowUpDate=Main.string(paper,"followUpAt"),oldFollowUpReason=Main.string(paper,"followUpReason");
+            Map<String, Object> originalTerms = new LinkedHashMap<>(paper);
             Map<String, Object> nextFields = fields(input, paper);
             WriterPayments.validateTerms(paper, nextFields);
-            FinancialRules.validateCustomerTerms(paper,nextFields);
+            if(!input.containsKey("customerReceiptTotals"))FinancialRules.validateCustomerTerms(paper,nextFields);
             validateFollowUp(nextFields, paper, input);
             boolean journalChanged=!Main.string(paper,"journal").equals(Main.string(nextFields,"journal"));
             if(journalChanged){PublicationFees.initialize(paper);Map<String,Object> account=PublicationFees.current(paper);if(account!=null&&PublicationFees.hasTransactions(paper,Main.string(account,"id")))throw new ApiException(409,"当前投稿已有版面费流水，更换期刊请使用改投");}
@@ -64,11 +76,15 @@ public final class PaperService {
             boolean changed = List.of("status", "journal", "submissionSystem", "submissionUrl", "submittedAt").stream().anyMatch(k -> !Objects.equals(paper.get(k), nextFields.get(k)));
             boolean followUpChanged = !Main.string(paper,"followUpAt").equals(Main.string(nextFields,"followUpAt")) || !Main.string(paper,"followUpReason").equals(Main.string(nextFields,"followUpReason"));
             PublicationFees.recordChange(paper,nextFields);
-            paper.putAll(nextFields); touch(paper);
+            paper.putAll(nextFields); FollowUps.legacyUpdate(paper,oldFollowUpDate,oldFollowUpReason); touch(paper);
             BusinessService.updatePaper(state, paper, input);
             if(PublicationFees.hasTerms(input)||journalChanged)PublicationFees.updateCurrent(paper,Map.of("publicationFeeMode",nextFields.get("publicationFeeMode"),"publicationFeeAmount",BigDecimal.valueOf(number(nextFields.get("publicationFeeCents")),2).toPlainString()));
             if(PublicationFees.hasTerms(input)||journalChanged)FinancialLedger.audit(paper,"fee_update",Map.of("publicationAccountId",PublicationFees.current(paper).get("id")),FinancialLedger.actor(vault),"论文表单更新费用："+PublicationFees.descriptionAccount(PublicationFees.current(paper)),"");
-            WriterPayments.apply(paper, input,FinancialLedger.actor(vault));
+            WriterPayments.apply(paper, input,FinancialLedger.actor(vault));CustomerReceipts.apply(paper,input,FinancialLedger.actor(vault));
+            if(input.containsKey("customerReceiptTotals")) {
+                originalTerms.put("transactions",paper.get("transactions"));
+                FinancialRules.validateCustomerTerms(originalTerms,paper);
+            }
             if (changed) Json.array(paper.get("history")).add(event(paper, "更新投稿进度"));
             if (followUpChanged) {
                 String date=Main.string(paper,"followUpAt"),reason=Main.string(paper,"followUpReason");
@@ -79,10 +95,17 @@ public final class PaperService {
         });
     }
 
+    public Map<String,Object> saveFollowUp(String id,String taskId,Map<String,Object> input) throws Exception {
+        return vault.mutate(state -> {
+            Map<String,Object> paper=find(state,id);checkVersion(paper,input);
+            FollowUps.save(paper,taskId,input);touch(paper);
+            return publicPaper(paper,true,state);
+        });
+    }
+
     public void delete(String id, Map<String, Object> input) throws Exception {
         vault.mutate(state -> {
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
-            if(!Json.array(paper.get("transactions")).isEmpty())throw new ApiException(409,"该论文已有收支或财务留痕，请保留档案；账务更正请使用冲销");
             Json.array(state.get("papers")).remove(paper); return null;
         });
     }
@@ -152,7 +175,7 @@ public final class PaperService {
         if (previous != null) values.putAll(previous); values.putAll(input);
         values.putIfAbsent("status", "待投稿");
         Map<String, Object> result = new LinkedHashMap<>();
-        for (String field : FIELDS) result.put(field, field.endsWith("At") ? date(values, field) : text(values, field, field.equals("notes") ? 5000 : field.equals("followUpReason") ? 1000 : field.equals("title") ? 300 : 200));
+        for (String field : FIELDS) result.put(field, field.endsWith("At") ? date(values, field) : text(values, field, field.equals("notes") ? 5000 : field.equals("authorBio") ? 2000 : field.equals("followUpReason") ? 1000 : field.equals("title") ? 300 : 200));
         if (Main.string(result, "title").isEmpty()) throw new ApiException(400, "请填写论文题目");
         if (!STATUSES.contains(Main.string(result, "status"))) throw new ApiException(400, "请选择有效的投稿状态");
         String email = Main.string(result, "boundEmail");
@@ -190,6 +213,9 @@ public final class PaperService {
     static Map<String, Object> publicPaper(Map<String, Object> paper, boolean detail, Map<String, Object> state) {
         Map<String, Object> result = new LinkedHashMap<>(paper);
         result.put("followUpReason",Main.string(paper,"followUpReason"));
+        result.put("authorBio",Main.string(paper,"authorBio"));
+        result.put("followUps",new ArrayList<>(FollowUps.tasks(paper)));
+        if(!detail)result.remove("followUpHistory");
         result.remove("submissionPassword"); result.put("hasPassword", !Main.string(paper, "submissionPassword").isEmpty());
         result.put("files", new ArrayList<>(AttachmentService.files(paper)));
         if (!detail) result.remove("history");
@@ -219,6 +245,7 @@ public final class PaperService {
     }
 
     static void validateStored(Map<String, Object> paper) {
+        FollowUps.validateStored(paper);
         FinancialLedger.validateStored(paper);
         ServiceTermination.validateStored(paper);
         PublicationFees.validateStored(paper);
