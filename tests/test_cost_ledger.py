@@ -90,7 +90,8 @@ class CostLedgerTest(ApiTestCase):
         self.assertTrue(all(a['actor'] == 'test-user' for a in p['financialAudit']))
         self.call('POST', path + '/transactions/' + original['id'] + '/reversal', {
             'version': p['version'], 'reason': '重复操作', 'confirmReversal': True}, expected=409)
-        self.call('DELETE', path, {'version': p['version']}, expected=409)
+        self.call('DELETE', path, {'version': p['version']})
+        self.call('GET', path, expected=404)
 
     def test_receipts_are_separate_encrypted_and_survive_backup_and_restart(self):
         p = self.cost_paper(); path = '/api/papers/' + p['id']

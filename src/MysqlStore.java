@@ -246,6 +246,9 @@ public final class MysqlStore implements ApplicationStore {
                 migrateServiceTermination(c);
                 migratePublicationFees(c);
                 migrateFinancialAudit(c);
+                migrateAuthorBio(c);
+                migrateExpectedPublication(c);
+                migrateFollowUpTasks(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -308,6 +311,39 @@ public final class MysqlStore implements ApplicationStore {
         if(scalar(c,"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_submission' AND column_name='manuscript_id'").equals("0"))
             try(Statement statement=c.createStatement()){statement.execute("ALTER TABLE lw_submission ADD COLUMN manuscript_id VARCHAR(36) NOT NULL DEFAULT '' COMMENT '本次投稿使用的论文文件版本 UUID'");}
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(5,?,?,UTC_TIMESTAMP(6))","论文文件与稿件版本",checksum);
+    }
+    private void migrateFollowUpTasks(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V013__follow_up_tasks.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=13");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V013 数据库迁移脚本校验不一致");return;}
+        try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(13,?,?,UTC_TIMESTAMP(6))","独立跟进事项与处理历史",checksum);
+    }
+
+    private void migrateExpectedPublication(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V012__expected_publication.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=12");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V012 数据库迁移脚本校验不一致");return;}
+        if(scalar(c,"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_submission' AND column_name='expected_published_at'").equals("0"))
+            try(Statement statement=c.createStatement()){statement.execute(script);}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(12,?,?,UTC_TIMESTAMP(6))","投稿预计发表日期",checksum);
+    }
+
+    private void migrateAuthorBio(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V011__author_bio.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=11");
+        if(!saved.isEmpty()) {
+            if(!saved.equals(checksum))throw new IllegalStateException("已执行的 V011 数据库迁移脚本校验不一致");
+            return;
+        }
+        String column=scalar(c,"SELECT CONCAT(data_type,':',character_maximum_length,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_paper' AND column_name='author_bio'");
+        if(column.isEmpty()) {
+            try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        }else if(!column.equals("varchar:2000:NO:"))throw new IllegalStateException("作者简介字段格式不兼容");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(11,?,?,UTC_TIMESTAMP(6))","论文作者简介",checksum);
     }
     private void migrateFollowUpReason(Connection c) throws Exception {
         String script=Files.readString(config.root.resolve("db/mysql/V006__follow_up_reason.sql"),StandardCharsets.UTF_8);

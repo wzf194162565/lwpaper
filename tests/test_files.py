@@ -181,3 +181,28 @@ class AttachmentTest(ApiTestCase):
         self.call('POST', '/api/restore', {'backup': base64.b64encode(legacy).decode(), 'password': 'Test-password-2026'})
         self.assertEqual([], self.call('GET', '/api/papers')[0]['files'])
         self.assertEqual([], list(self.data.rglob('*.bin')))
+
+
+    def test_delete_paper_removes_manuscripts_receipts_and_ledger_but_keeps_other_files(self):
+        self.setup_account()
+        paper=self.upload(self.create())
+        path=f"/api/papers/{paper['id']}"
+        paper=self.call('POST',path+'/transactions',{'version':paper['version'],'type':'incoming_deposit','amount':'100','date':'2026-01-01'},expected=201)
+        transaction=paper['transactions'][0]
+        paper=self.upload(paper,name='receipt.pdf',**{'X-Transaction-Id':transaction['id']})
+        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'待删除期刊','submissionPassword':'disposable'},expected=201)
+        other=self.upload(self.create(title='保留论文'),content=PDF+b'keep')
+        deleted_files=[file['id'] for file in paper['files']]
+        before={blob.stem for blob in self.data.rglob('*.bin')}
+        self.assertTrue(set(deleted_files)<=before)
+        self.call('DELETE',path,{'version':paper['version']})
+        self.call('GET',path,expected=404)
+        for file_id in deleted_files:
+            self.call('GET',path+'/files/'+file_id,expected=404)
+        self.assertFalse(set(deleted_files)&{blob.stem for blob in self.data.rglob('*.bin')})
+        self.assertEqual(PDF+b'keep',self.download_file(other))
+        self.assertEqual({other['id']},{p['id'] for p in self.call('GET','/api/papers')})
+        self.process.terminate();self.process.wait(timeout=10);self.reset_client();self.start_server()
+        self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
+        self.call('GET',path,expected=404)
+        self.assertEqual(PDF+b'keep',self.download_file(other))

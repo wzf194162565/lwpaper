@@ -291,15 +291,24 @@ public final class BusinessService {
         for (String field : List.of("title", "journal", "submissionSystem", "submissionUrl", "submissionAccount", "boundEmail", "boundPhone", "status", "notes")) result.put(field, PaperService.text(merged, field, field.equals("notes") ? 5000 : field.equals("title") ? 300 : 200));
         if (Main.string(result, "journal").isEmpty()) throw new ApiException(400, "请填写投稿期刊名称");
         if (!PaperService.STATUSES.contains(Main.string(result, "status"))) throw new ApiException(400, "投稿状态不正确");
-        for (String field : List.of("submittedAt", "endedAt", "publishedAt")) result.put(field, PaperService.date(merged, field));
+        for (String field : List.of("submittedAt", "endedAt", "publishedAt", "expectedPublishedAt")) result.put(field, PaperService.date(merged, field));
         String password = Main.string(merged, "submissionPassword");
         if (password.length() > 500 || (merged.containsKey("submissionPassword") && !(merged.get("submissionPassword") instanceof String))) throw new ApiException(400, "投稿密码格式不正确，最多 500 个字符");
         result.put("submissionPassword", password);
         String manuscript=PaperService.text(merged,"manuscriptId",36);
         if(!manuscript.isEmpty()&&AttachmentService.receipt(AttachmentService.find(paper,manuscript)))throw new ApiException(400,"收支凭证不能作为投稿稿件");
         result.put("manuscriptId",manuscript);
+        if(Main.string(result,"status").equals("已录用")&&Main.string(result,"endedAt").isEmpty())throw new ApiException(400,"请填写实际录用日期");
         validateContactAndUrl(result); autoEndDates(result); validateSubmissionDates(result, true);
+        if(input.containsKey("expectedPublishedAt"))validateExpectedPublication(result);
         return result;
+    }
+
+    private static void validateExpectedPublication(Map<String,Object> sub) {
+        String expected=PaperService.date(sub,"expectedPublishedAt");
+        if(expected.isEmpty())return;
+        String accepted=PaperService.date(sub,"endedAt");
+        if(!accepted.isEmpty()&&expected.compareTo(accepted)<=0)throw new ApiException(400,"预计发表日期必须晚于录用日期");
     }
 
     private static void autoEndDates(Map<String, Object> sub) {

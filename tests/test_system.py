@@ -351,8 +351,11 @@ class SystemTest(ApiTestCase):
         self.assertEqual(200001, paper['receivableCents'])
         paper = self.call('PUT', path, self.payload(paper, submissionPassword=''))
         self.assertFalse(paper['hasPassword'])
-        self.call('DELETE', path, {'version': paper['version']},expected=409)
-        self.assertEqual(1,len(self.call('GET', '/api/papers')))
+        self.call('DELETE', path, {'version': original['version']}, expected=409)
+        self.assertEqual(1, len(self.call('GET', '/api/papers')))
+        self.call('DELETE', path, {'version': paper['version']})
+        self.assertEqual([], self.call('GET', '/api/papers'))
+        self.call('GET', path, expected=404)
 
     def test_validation_and_failed_changes_are_atomic(self):
         self.setup_account()
