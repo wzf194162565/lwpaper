@@ -13,6 +13,21 @@ class RegistrationCases:
     credentials = {'username': 'registered-user', 'email': 'registered-user@qq.com',
                    'password': 'Registration-password-2026'}
 
+    def test_empty_system_login_guides_registration_without_creating_account(self):
+        data = dict(self.credentials)
+        error = self.call('POST', '/api/login', {'username': data['username'], 'password': data['password']}, expected=409)
+        self.assertEqual('REGISTRATION_REQUIRED', error['code'])
+        self.assertIn('注册', error['error'])
+        self.assertNotIn('初始化', error['error'])
+        self.assertFalse(error['initialized'])
+        self.assertFalse(error['authenticated'])
+        self.assertFalse(self.call('GET', '/api/session')['initialized'])
+        code = self.registration_code(data)
+        self.call('POST', '/api/register', {**data, 'code': code})
+        self.csrf = self.call('POST', '/api/login', {'username': data['username'], 'password': data['password']})['csrf']
+        self.assertTrue(self.call('GET', '/api/session')['authenticated'])
+        self.assertEqual([], self.call('GET', '/api/papers'))
+
     def test_registration_requires_code_and_does_not_log_in(self):
         data = dict(self.credentials)
         self.call('POST', '/api/register', data, expected=400)

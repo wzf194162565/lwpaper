@@ -447,12 +447,11 @@ class MysqlTest(ApiTestCase):
         for table in ('lw_paper', 'lw_writing_task', 'lw_submission', 'lw_financial_transaction',
                       'lw_paper_history', 'lw_paper_current_submission'):
             column = 'id' if table == 'lw_paper' else 'paper_id'
-            expected={'lw_submission':2,'lw_financial_transaction':2}.get(table,1)
             actual=int(self.sql(f"SELECT COUNT(*) FROM {table} WHERE {column}='{self.deleted_paper_id}'"))
-            self.assertGreaterEqual(actual,expected,table)
+            self.assertEqual(0,actual,table)
         ids = ','.join("'" + value + "'" for value in self.deleted_submission_ids)
-        self.assertEqual('2', self.sql(f"SELECT COUNT(*) FROM lw_submission_credential WHERE submission_id IN ({ids})"))
-        self.assertGreaterEqual(int(self.sql(f"SELECT COUNT(*) FROM lw_financial_audit WHERE paper_id='{self.deleted_paper_id}'")),2)
+        self.assertEqual('0', self.sql(f"SELECT COUNT(*) FROM lw_submission_credential WHERE submission_id IN ({ids})"))
+        self.assertEqual(0,int(self.sql(f"SELECT COUNT(*) FROM lw_financial_audit WHERE paper_id='{self.deleted_paper_id}'")))
 
     def test_half_papers_have_no_writing_task_and_schema_upgrade_preserves_old_tasks(self):
         self.setup_account()

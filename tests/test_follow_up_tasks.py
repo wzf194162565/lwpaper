@@ -60,6 +60,8 @@ class FollowUpTasksTest(ApiTestCase):
     def test_atomic_validation_concurrent_edits_and_task_ownership(self):
         self.setup_account()
         paper = self.create()
+        # Compare persisted snapshots: SQL timestamps have microsecond precision.
+        paper = self.call('GET', '/api/papers/' + paper['id'])
         original = paper
         for changes in ({'content': '', 'date': '2030-01-12'},
                         {'content': '新要求', 'date': ''},

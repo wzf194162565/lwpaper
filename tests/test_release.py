@@ -77,7 +77,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertIn('SmtpMailer.class', jar.namelist())
             self.assertIn('RecoveryCodes.class', jar.namelist())
         for name in ('db/mysql/V001__initial_schema.sql', 'db/mysql/V002__customer_cooperation_date.sql',
-                     'web/files.js', 'web/ledger.js', 'web/followups.js', 'db/mysql/V013__follow_up_tasks.sql', 'db/mysql/V014__account_recovery_email.sql', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'db/mysql/V008__service_termination.sql', 'db/mysql/V009__publication_fees.sql','db/mysql/V010__submission_costs_and_financial_audit.sql','deploy/backup.sh',
+                     'web/files.js', 'web/ledger.js', 'web/followups.js', 'db/mysql/V013__follow_up_tasks.sql', 'db/mysql/V014__account_recovery_email.sql', 'db/mysql/V015__login_password_copy.sql', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'db/mysql/V008__service_termination.sql', 'db/mysql/V009__publication_fees.sql','db/mysql/V010__submission_costs_and_financial_audit.sql','deploy/backup.sh',
                      'db/mysql/V003__paper_service_type.sql', 'db/mysql/V004__customer_payment_deposit.sql', 'deploy/nginx.conf.example', 'deploy/paper-desk.service',
                      'tools/backup_mysql.py', 'deploy/mysql-init.sql.example', 'deploy/backup.cron.example',
                      'config/mysql-client.example.cnf'):

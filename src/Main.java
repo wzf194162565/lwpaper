@@ -133,6 +133,9 @@ public class Main {
                 String username = string(credentials, "username"), password = string(credentials, "password");
                 // Keep credential verification and session issuance atomic with password changes.
                 synchronized (accounts) {
+                    if(path.equals("/api/login")&&!accounts.initialized()) {
+                        json(ex,409,Map.of("error","当前没有可登录的账号，请先点击“注册”创建账号。","code","REGISTRATION_REQUIRED","initialized",false,"authenticated",false));return;
+                    }
                     ApplicationStore store = switch (path) {
                         case "/api/login" -> accounts.login(username, password);
                         default -> accounts.setup(username, password);

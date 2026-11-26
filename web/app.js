@@ -134,6 +134,14 @@ function showForgotPassword() {
  const entry=$('#auth-recovery-entry');
  if(entry)entry.innerHTML='<button type="button" class="text-btn auth-forgot" data-action="forgot-password">忘记密码？通过邮箱找回</button>';
 }
+function registrationEntry() {
+ return '<button type="button" class="text-btn auth-forgot" data-action="auth-mode" data-mode="register">注册账号</button>';
+}
+function showRegistrationRequired() {
+ state.initialized=false;state.loginFailed=false;
+ const entry=$('#auth-recovery-entry');
+ if(entry)entry.innerHTML=registrationEntry();
+}
 let recoveryTimer;
 function updateRecoveryCooldown() {
  clearTimeout(recoveryTimer);
@@ -167,7 +175,7 @@ function renderAuth() {
  const mode=['register','forgot'].includes(state.authMode)?state.authMode:'login';
  const setup=mode==='register',recovering=mode==='forgot';
  const title=recovering?'找回密码':setup?'注册账号':'登录系统';
- const subtitle=recovering?'使用注册时绑定的邮箱接收验证码，设置新的登录密码。':setup?'填写账号和 QQ 邮箱，获取验证码后完成注册。注册成功后请登录。':'输入账号与密码，继续处理你的投稿记录。';
+ const subtitle=recovering?'使用注册时绑定的邮箱接收验证码，设置新的登录密码。':setup?'填写账号和 QQ 邮箱，获取验证码后完成注册。注册成功后请登录。':state.initialized?'输入账号与密码，继续处理你的投稿记录。':'当前没有可登录的账号，请先注册。';
  const passwordField=(name,label,fresh=false)=>`<div class="field"><label for="auth-${name}">${label}</label><div class="auth-password-input"><input id="auth-${name}" name="${name}" type="password" required minlength="${fresh?10:1}" maxlength="128" autocomplete="${fresh?'new-password':'current-password'}" placeholder="${fresh?'10–128 个字符':'请输入管理密码'}">${passwordVisibilityButton(`auth-${name}`,label,'toggle-auth-password')}</div></div>`;
  const form=`<form id="auth-form" novalidate data-mode="${mode}">
   <div class="field"><label for="auth-username">登录账号</label><input id="auth-username" name="username" type="text" required minlength="3" maxlength="64" ${setup?'pattern="[A-Za-z0-9][A-Za-z0-9_.@+\\-]{2,63}" title="3–64 个字符，以字母或数字开头，支持字母、数字、下划线、点、@、加号和减号"':''} autocomplete="username" placeholder="请输入登录账号" value="${esc(state.username)}" autofocus>${setup?'<small>3–64 个字符，以字母或数字开头，支持 _ . @ + -</small>':''}</div>
@@ -177,7 +185,7 @@ function renderAuth() {
   ${setup||recovering?passwordField('confirm',recovering?'确认新密码':'确认密码',true):''}
   ${setup?'<small>每个账号拥有独立的客户、论文与收支记录。</small>':''}
   <div class="error-message" id="auth-error" role="alert"></div>
-  ${mode==='login'?'<div id="auth-recovery-entry"></div>':''}
+  ${mode==='login'?`<div id="auth-recovery-entry">${state.initialized?'':registrationEntry()}</div>`:''}
   <button class="btn primary" type="submit">${recovering?'重置密码':setup?'完成注册':'登录工作台'}${icon('chevron')}</button>
   ${recovering?'<button type="button" class="text-btn auth-back" data-action="auth-mode" data-mode="login">返回登录</button>':''}
  </form>`;
@@ -191,7 +199,7 @@ function accountSettings() {
 
 function renderShell() {
  const views = {papers:'论文管理',submissions:'投稿管理',customers:'客户管理',records:'论文总览',followups:'待跟进事项',finance:'收支管理',settings:'数据与设置'};
- $('#root').innerHTML = `<div class="app-shell"><aside class="sidebar" id="sidebar">${brand()}<div class="workspace-tag">我的工作空间</div><nav class="nav" aria-label="主导航">${[['records','grid','论文总览'],['customers','users','客户管理'],['papers','document','论文管理'],['submissions','upload','投稿管理'],['followups','calendar','待跟进事项'],['finance','wallet','收支管理'],['settings','settings','数据与设置']].map(([id,glyph,label]) => `<button class="nav-item ${state.view === id ? 'active' : ''}" data-action="navigate" data-view="${id}" ${state.view === id ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></button>`).join('')}</nav><div class="sidebar-bottom"><div class="local-note"><strong>${icon('shield')}安心记录，妥善保管</strong>${state.storage==='mysql'?'投稿密码加密保存，<br>业务记录可下载加密备份。':'你的投稿信息与账号密码<br>均在本机加密保存。'}</div><div class="profile"><div class="avatar">管</div><div><div class="profile-name">${esc(state.username||'我的工作台')}</div><div class="profile-sub">独立工作空间</div></div><button class="icon-btn" data-action="logout" title="退出并锁定" aria-label="退出并锁定">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="打开导航">${icon('menu')}</button>${icon('grid')}<span>工作空间</span>${icon('chevron')}<strong>${views[state.view]}</strong></div><div class="topbar-right">${btn('change-password','修改密码','lock','account-password')}<button class="icon-btn" data-action="refresh" title="刷新列表" aria-label="刷新列表">${icon('refresh')}</button><span class="today-text">${new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'})}</span><span class="connection"><span class="dot"></span>本地工作台</span></div></header><div class="content" id="content"></div></main></div>`;
+ $('#root').innerHTML = `<div class="app-shell"><aside class="sidebar" id="sidebar">${brand()}<div class="workspace-tag">我的工作空间</div><nav class="nav" aria-label="主导航">${[['records','grid','论文总览'],['customers','users','客户管理'],['papers','document','论文管理'],['submissions','upload','投稿管理'],['followups','calendar','待跟进事项'],['finance','wallet','收支管理'],['settings','settings','数据与设置']].map(([id,glyph,label]) => `<button class="nav-item ${state.view === id ? 'active' : ''}" data-action="navigate" data-view="${id}" ${state.view === id ? 'aria-current="page"' : ''}>${icon(glyph)}<span>${label}</span></button>`).join('')}</nav><div class="sidebar-bottom"><div class="local-note"><strong>${icon('shield')}安心记录，妥善保管</strong>${state.storage==='mysql'?'投稿密码加密保存，<br>业务记录可下载加密备份。':'你的投稿信息与账号密码<br>均在本机加密保存。'}</div><div class="profile"><div class="avatar">管</div><div><div class="profile-name">${esc(state.username||'我的工作台')}</div><div class="profile-sub">独立工作空间</div></div><button class="icon-btn" data-action="logout" title="退出并锁定" aria-label="退出并锁定">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="menu" aria-label="打开导航">${icon('menu')}</button>${icon('grid')}<span>工作空间</span>${icon('chevron')}<strong>${views[state.view]}</strong></div><div class="topbar-right"><button class="icon-btn" data-action="refresh" title="刷新列表" aria-label="刷新列表">${icon('refresh')}</button><span class="today-text">${new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'})}</span><span class="connection"><span class="dot"></span>本地工作台</span></div></header><div class="content" id="content"></div></main></div>`;
  renderContent();
 }
 
@@ -216,6 +224,7 @@ function followUpStats() {
 }
 function footer() { return `<footer class="footer-note"><span>${icon('shield')}${state.storage==='mysql'?'数据保存在 MySQL · 投稿密码默认隐藏':'数据保存在本机 · 密码默认隐藏'}</span><span>知序 PAPER DESK &nbsp; / &nbsp; 让每一次投稿都有迹可循</span></footer>`; }
 function renderContent() {
+ closePageSizeMenu();
  if(state.view==='followups')return renderFollowUps();
  if(state.view==='papers')return renderPaperManagement();
  if(state.view==='submissions')return renderSubmissions();
@@ -224,7 +233,7 @@ function renderContent() {
  if (state.view === 'finance') return renderFinance();
  const followups = state.view === 'followups';
  const tabs = followups ? [['all','全部计划',followUpPlans().length],['due','到期待跟进',state.papers.filter(due).length],['upcoming','未来 7 天',upcoming().length]] : [['all','全部记录',state.papers.length],['active','进行中',state.papers.filter(paperInProgress).length],['due','到期待跟进',state.papers.filter(due).length],['accepted','已录用',state.papers.filter(accepted).length],['published','已发表',state.papers.filter(published).length],['finished','已归档',state.papers.filter(terminal).length]];
- $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down')+(followups?'':btn('navigate','查看论文管理','document','','data-view="papers"')))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用单独归入“已录用”，不计入“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
+ $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down'))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用单独归入“已录用”，不计入“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
  renderPaperResults();
 }
 function upcoming() { const end = new Date(); end.setDate(end.getDate()+7); const day = `${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`; return followUpPlans().filter(p=>p.followUpAt>today()&&p.followUpAt<=day); }
@@ -252,15 +261,106 @@ function filteredPapers() {
 function emptyState(filtered=false, label='论文') {
  if(state.view==='followups'){
   const hasFilters=Boolean(state.search.trim()||state.status||state.from||state.to||state.tab!=='all');
-  return `<div class="empty-state"><div class="empty-illustration">${icon('calendar')}</div><h3>${hasFilters?'没有符合条件的跟进事项':'暂无跟进计划'}</h3><p>${hasFilters?'调整筛选条件，查看其他跟进计划。':'可在已有论文中设置跟进日期及事项，到期后会在这里提醒。'}</p>${hasFilters?btn('clear-filters','重置筛选','refresh'):btn('navigate','查看论文','document','','data-view="papers"')}</div>`;
+  return `<div class="empty-state"><div class="empty-illustration">${icon('calendar')}</div><h3>${hasFilters?'没有符合条件的跟进事项':'暂无跟进计划'}</h3><p>${hasFilters?'调整筛选条件，查看其他跟进计划。':'可在已有论文中设置跟进日期及事项，到期后会在这里提醒。'}</p>${hasFilters?btn('clear-filters','重置筛选','refresh'):btn('navigate','查看论文','document','primary','data-view="papers"')}</div>`;
  }
- return `<div class="empty-state"><div class="empty-illustration">${icon(filtered?'search':'document')}</div><h3>${filtered?'没有找到符合条件的记录':`还没有${label}记录`}</h3><p>${filtered?'试试其他关键词，或重置筛选条件。':'请在论文管理中建立论文档案，再查看投稿进度和收支记录。'}</p>${filtered?btn('clear-filters','重置筛选','refresh'):btn('navigate','前往论文管理','document','','data-view="papers"')}</div>`;
+ return `<div class="empty-state"><div class="empty-illustration">${icon(filtered?'search':'document')}</div><h3>${filtered?'没有找到符合条件的记录':`还没有${label}记录`}</h3><p>${filtered?'试试其他关键词，或重置筛选条件。':'请在论文管理中建立论文档案，再查看投稿进度和收支记录。'}</p>${filtered?btn('clear-filters','重置筛选','refresh'):btn('navigate','前往论文管理','document','primary','data-view="papers"')}</div>`;
 }
+const pageSizeOptions=[5,8,10,20,50,100];
+const pageSizePreferences={};
+let pageSizeMenu=null;
+function closePageSizeMenu(restoreFocus=false) {
+ if(!pageSizeMenu)return;
+ const {element,trigger}=pageSizeMenu;pageSizeMenu=null;
+ element.remove();trigger.setAttribute('aria-expanded','false');
+ if(restoreFocus&&trigger.isConnected)trigger.focus({preventScroll:true});
+}
+function activatePageSizeOption(index) {
+ if(!pageSizeMenu)return;
+ pageSizeMenu.activeIndex=Math.max(0,Math.min(pageSizeOptions.length-1,index));
+ const {element,activeIndex}=pageSizeMenu;
+ element.setAttribute('aria-activedescendant',`page-size-option-${pageSizeOptions[activeIndex]}`);
+ element.querySelectorAll('[role="option"]').forEach((option,i)=>{
+  option.classList.toggle('is-active',i===activeIndex);
+  if(i===activeIndex)option.scrollIntoView({block:'nearest'});
+ });
+}
+function openPageSizeMenu(trigger) {
+ closePageSizeMenu();
+ const selected=pageSizePreference(),element=document.createElement('div');
+ element.id='page-size-options';element.className='page-size-menu';element.tabIndex=-1;
+ element.setAttribute('role','listbox');element.setAttribute('aria-label','每页显示条数');
+ element.innerHTML=pageSizeOptions.map(size=>`<button type="button" class="page-size-option${size===selected?' is-selected':''}" id="page-size-option-${size}" role="option" aria-selected="${size===selected}" tabindex="-1" data-action="page-size-option" data-page-size="${size}"><span>${size}</span>${size===selected?icon('check'):''}</button>`).join('');
+ document.body.append(element);
+ pageSizeMenu={element,trigger,activeIndex:pageSizeOptions.indexOf(selected)};
+ trigger.setAttribute('aria-expanded','true');
+ const anchor=trigger.getBoundingClientRect(),menu=element.getBoundingClientRect(),margin=12,gap=8;
+ const viewportWidth=document.documentElement.clientWidth,viewportHeight=window.innerHeight;
+ const above=Math.max(0,anchor.top-gap-margin),below=Math.max(0,viewportHeight-anchor.bottom-gap-margin);
+ const opensAbove=above>=menu.height||above>=below,available=opensAbove?above:below,height=Math.min(menu.height,available);
+ element.style.maxHeight=`${available}px`;
+ element.style.left=`${Math.max(margin,Math.min(anchor.right-menu.width,viewportWidth-menu.width-margin))}px`;
+ element.style.top=`${opensAbove?anchor.top-gap-height:anchor.bottom+gap}px`;
+ element.focus({preventScroll:true});activatePageSizeOption(pageSizeMenu.activeIndex);
+}
+function selectPageSize(value) {
+ if(!pageSizeOptions.includes(Number(value)))return;
+ closePageSizeMenu();setPageSize(value);$('#page-size')?.focus({preventScroll:true});
+}
+function handlePageSizeKeydown(event) {
+ if(!pageSizeMenu){
+  if(event.target?.id!=='page-size'||!['ArrowDown','ArrowUp'].includes(event.key))return false;
+  event.preventDefault();openPageSizeMenu(event.target);return true;
+ }
+ const moves={ArrowDown:pageSizeMenu.activeIndex+1,ArrowUp:pageSizeMenu.activeIndex-1,Home:0,End:pageSizeOptions.length-1};
+ if(Object.hasOwn(moves,event.key)){event.preventDefault();activatePageSizeOption(moves[event.key]);return true;}
+ if(event.key==='Enter'||event.key===' '){event.preventDefault();selectPageSize(pageSizeOptions[pageSizeMenu.activeIndex]);return true;}
+ if(event.key==='Escape'){event.preventDefault();closePageSizeMenu(true);return true;}
+ if(event.key==='Tab'){closePageSizeMenu(true);return true;}
+ return false;
+}
+function paginationKey() { return `${state.username}:${state.view}${state.view==='finance'?':'+state.financeType:''}`; }
+function pageSizePreference() {
+ const key=paginationKey();
+ if(Object.hasOwn(pageSizePreferences,key))return pageSizePreferences[key];
+ try { const saved=localStorage.getItem('paper-desk:page-size:'+key);pageSizePreferences[key]=pageSizeOptions.includes(Number(saved))?Number(saved):8; }
+ catch { pageSizePreferences[key]=8; }
+ return pageSizePreferences[key];
+}
+function updatePageSize() {
+ const next=pageSizePreference();
+ if(next!==state.pageSize) {
+  const first=(Math.max(1,state.page)-1)*state.pageSize;
+  state.pageSize=next;state.page=Math.floor(first/next)+1;
+ }
+ const results=$('#results');
+ if(Number.isFinite(window.innerHeight)) {
+  const top=(results?.getBoundingClientRect?.().top??500)+(window.scrollY||0);
+  results?.style?.setProperty?.('--table-max-height',Math.max(240,window.innerHeight-top-96)+'px');
+ }
+}
+function setPageSize(value) {
+ const preference=Number(value);
+ if(!pageSizeOptions.includes(preference))return;
+ pageSizePreferences[paginationKey()]=preference;
+ try { localStorage.setItem('paper-desk:page-size:'+paginationKey(),String(preference)); } catch {}
+ state.page=1;updatePageSize();state.page=1;renderResults();
+}
+let paginationResizeTimer;
+window.addEventListener('resize',()=>{
+ closePageSizeMenu();
+ clearTimeout(paginationResizeTimer);
+ paginationResizeTimer=setTimeout(()=>{if(state.authenticated&&!state.drawer&&!state.modal&&$('#results')){updatePageSize();renderResults();}},150);
+});
+window.addEventListener('scroll',event=>{
+ if(pageSizeMenu&&!pageSizeMenu.element.contains(event.target))closePageSizeMenu();
+},true);
 function pagination(total) {
- const pages = Math.max(1,Math.ceil(total/state.pageSize)); state.page = Math.min(state.page,pages);
- const visible = Array.from({length:pages},(_,i)=>i+1).filter(p=>p===1||p===pages||Math.abs(p-state.page)<=1);
+ closePageSizeMenu();
+ updatePageSize();
+ const pages = Math.max(1,Math.ceil(total/state.pageSize)); state.page = Math.max(1,Math.min(Number.isFinite(state.page)?Math.floor(state.page):1,pages));
+ const visible = [...new Set([1,state.page-1,state.page,state.page+1,pages])].filter(p=>p>=1&&p<=pages).sort((a,b)=>a-b);
  let last=0;
- return `<div class="table-footer"><span>共 ${total} 条记录${total?`，显示 ${(state.page-1)*state.pageSize+1}–${Math.min(state.page*state.pageSize,total)} 条`:''}</span><div class="pagination"><button class="page-btn" data-action="page" data-page="${state.page-1}" ${state.page<=1?'disabled':''} aria-label="上一页">${icon('left')}</button>${visible.map(p=>{const gap=p-last>1?'<span>…</span>':'';last=p;return `${gap}<button class="page-btn ${p===state.page?'active':''}" data-action="page" data-page="${p}" aria-label="第 ${p} 页" ${p===state.page?'aria-current="page"':''}>${p}</button>`;}).join('')}<button class="page-btn" data-action="page" data-page="${state.page+1}" ${state.page>=pages?'disabled':''} aria-label="下一页">${icon('chevron')}</button></div></div>`;
+ return `<div class="table-footer"><span>共 ${total} 条记录${total?`，显示 ${(state.page-1)*state.pageSize+1}–${Math.min(state.page*state.pageSize,total)} 条`:''}</span><div class="pagination-controls"><div class="page-size-control"><span>每页</span><button type="button" class="page-size-trigger" id="page-size" data-action="page-size-toggle" aria-label="每页 ${state.pageSize} 条" aria-haspopup="listbox" aria-expanded="false" aria-controls="page-size-options"><span>${state.pageSize}</span>${icon('chevron')}</button><span>条</span></div><nav class="pagination" aria-label="分页导航"><button class="page-btn" data-action="page" data-page="${state.page-1}" ${state.page<=1?'disabled':''} aria-label="上一页">${icon('left')}</button>${visible.map(p=>{const gap=p-last>1?'<span>…</span>':'';last=p;return `${gap}<button class="page-btn ${p===state.page?'active':''}" data-action="page" data-page="${p}" aria-label="第 ${p} 页" ${p===state.page?'aria-current="page"':''}>${p}</button>`;}).join('')}<button class="page-btn" data-action="page" data-page="${state.page+1}" ${state.page>=pages?'disabled':''} aria-label="下一页">${icon('chevron')}</button></nav></div></div>`;
 }
 function sequenceCell(index) {
  return `<td class="sequence-cell">${(state.page-1)*state.pageSize+index+1}</td>`;
@@ -378,7 +478,7 @@ function renderFinanceResults() {
  if(state.from&&state.to&&state.from>state.to){$('#results').innerHTML='<div class="empty-state"><h3>起始日期不能晚于截止日期</h3></div>';return;}
  if(!txs.length) {
   const hasTransactions=allTransactions().length>0;
-  $('#results').innerHTML=`<div class="empty-state"><div class="empty-illustration">${icon('wallet')}</div><h3>${hasTransactions?'没有符合条件的流水':'还没有收支流水'}</h3><p>${hasTransactions?'试试其他关键词、收支日期或分类。':'费用约定与待收待付可在“应收应付”中查看。实际收付款需进入论文详情逐笔登记。'}</p>${hasTransactions?btn('clear-filters','重置筛选','refresh'):btn('finance-tab','查看应收应付','chevron','','data-type="balances"')}</div>`;
+  $('#results').innerHTML=`<div class="empty-state"><div class="empty-illustration">${icon('wallet')}</div><h3>${hasTransactions?'没有符合条件的流水':'还没有收支流水'}</h3><p>${hasTransactions?'试试其他关键词、收支日期或分类。':'费用约定与待收待付可在“应收应付”中查看。实际收付款需进入论文详情逐笔登记。'}</p>${hasTransactions?btn('clear-filters','重置筛选','refresh'):btn('finance-tab','查看应收应付','chevron','primary','data-type="balances"')}</div>`;
   return;
  }
  $('#results').innerHTML = `<div class="results-note">当前筛选：收入 ${yuan(txs.filter(t=>t.type.startsWith('incoming')).reduce((n,t)=>n+transactionAmount(t),0))} &nbsp; · &nbsp; 支出 ${yuan(txs.filter(t=>t.type.startsWith('outgoing')).reduce((n,t)=>n+transactionAmount(t),0))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>收支日期</th><th>关联论文</th><th>客户 / 写作者</th><th>收支类型</th><th>金额</th><th>收付方式 / 备注</th><th>操作</th></tr></thead><tbody>${txs.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((tx,index)=>`<tr>${sequenceCell(index)}<td>${dateLabel(tx.date)}</td><td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${esc(tx.paper.title)}</button><div class="paper-meta">${esc(tx.paper.code)}</div></td><td>${esc(publicationTypes.includes(tx.type)?tx.paper.journal||'期刊':['outgoing_refund','incoming_settlement','incoming_deposit','incoming_balance'].includes(tx.type)?tx.paper.customer||'—':tx.type==='incoming_writer_refund'?tx.paper.writer||'—':tx.type.startsWith('incoming')?tx.paper.customer||'—':tx.paper.writer||'—')}</td><td><span class="cash-label ${tx.type.startsWith('outgoing')?'outgoing':''}">${tx.reversalOf?'冲销 · ':''}${typeLabels[tx.type]}${tx.reversed?'（已冲销）':''}</span></td><td class="finance-amount ${tx.type.startsWith('incoming')?'incoming':'outgoing'}">${tx.type.startsWith('incoming')?'+':'−'}${yuan(transactionAmount(tx))}</td><td><div>${esc(tx.method||'—')}</div><div class="cell-sub" title="${esc(tx.note)}">${esc(tx.note.length>24?tx.note.slice(0,24)+'…':tx.note||'无备注')}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${icon('wallet')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
@@ -629,6 +729,7 @@ function navigateTo(view,customerId='') {
 function renderResults() { if(state.view==='papers')return renderManagedPaperResults();if(state.view==='submissions')return renderSubmissionResults();if(state.view==='customers')return renderCustomerResults();state.view==='finance'?renderFinanceResults():renderPaperResults(); }
 
 document.addEventListener('click', async event => {
+ if(pageSizeMenu&&!pageSizeMenu.trigger.contains(event.target)&&!pageSizeMenu.element.contains(event.target))closePageSizeMenu();
  const button=event.target.closest('[data-action]');if(!button||button.disabled)return;
  const action=button.dataset.action;
  if(fileTransferBusy){toast('文件正在传输，请等待完成。',true);return;}
@@ -657,7 +758,6 @@ document.addEventListener('click', async event => {
   else if(action==='followup-detail')await openDetail(button.dataset.id,'followups');
   else if(action==='followup-task-detail')await openFollowUpTaskDetail(button.dataset.id,button.dataset.taskId);
   else if(action==='cancel-followup')cancelFollowUpEditor();
-  else if(action==='change-password'){state.view='settings';renderShell();$('#current-password')?.focus();}
   else if(action==='terminate-service')openTerminationForm();
   else if(action==='cancel-termination')cancelTermination();
   else if(action==='settlement-payment')transactionForm(button.dataset.type);
@@ -668,6 +768,8 @@ document.addEventListener('click', async event => {
   else if(action==='close')closeOverlay();
   else if(action==='tab'){state.tab=button.dataset.tab;state.page=1;renderContent();}
   else if(action==='finance-tab'||action==='finance-source')selectFinanceTab(button.dataset.type,action==='finance-source');
+  else if(action==='page-size-toggle'){if(pageSizeMenu)closePageSizeMenu(true);else openPageSizeMenu(button);}
+  else if(action==='page-size-option')selectPageSize(button.dataset.pageSize);
   else if(action==='page'){state.page=Number(button.dataset.page);renderResults();}
   else if(action==='clear-filters'){resetFilters();renderContent();}
   else if(action==='refresh'){button.disabled=true;await loadPapers();toast('刷新成功');}
@@ -825,7 +927,7 @@ document.addEventListener('submit',async event=>{
   }
   else if(form.id==='password-form') {
    if(data.newPassword!==data.confirm)throw new Error('两次输入的新密码不一致');
-   const result=await request('POST','/api/password',{currentPassword:data.currentPassword,newPassword:data.newPassword});state.csrf=result.csrf;form.reset();toast('密码修改成功');
+   const result=await request('POST','/api/password',{currentPassword:data.currentPassword,newPassword:data.newPassword});if(origin.csrf!==state.csrf||!state.authenticated)return;state.csrf=result.csrf;if(form.isConnected)form.reset();toast('密码修改成功');
   }
   else if(form.id==='restore-form') {
    const file=$('#backup-file',form).files[0];if(!file)throw new Error('请选择备份文件');
@@ -834,7 +936,13 @@ document.addEventListener('submit',async event=>{
    const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
    await request('POST','/api/restore',{backup:btoa(binary),password:data.password});closeOverlay();resetFilters();await loadPapers();toast('恢复成功');
   }
- } catch(error) { if(form.id==='auth-form'&&form.dataset.mode==='login'&&(error.status===401||error.code==='INVALID_CREDENTIALS'))showForgotPassword();if(errorField?.isConnected)showFormError(form,error.message);else toast(error.message,true); }
+ } catch(error) {
+  if(form.id==='auth-form'&&form.dataset.mode==='login'){
+   if(error.code==='REGISTRATION_REQUIRED')showRegistrationRequired();
+   else if(error.status===401||error.code==='INVALID_CREDENTIALS')showForgotPassword();
+  }
+  if(errorField?.isConnected)showFormError(form,error.message);else toast(error.message,true);
+ }
  finally {fileTransferBusy=false;if(form.id==='auth-form')state.authSubmitting=false;if(submit?.isConnected){submit.disabled=false;submit.innerHTML=submitLabel;}}
 });
 
@@ -845,6 +953,7 @@ function hideCredential() {
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden)hideCredential();});
 document.addEventListener('keydown',event=>{
+ if(handlePageSizeKeydown(event))return;
  const overlay=$('#overlay-root');if(!overlay.hasChildNodes())return;
  if(event.key==='Escape'){
   if(fileTransferBusy){event.preventDefault();return;}

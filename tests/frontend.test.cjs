@@ -575,6 +575,27 @@ test('late save responses update records without closing a newer editor or reset
  }
 });
 
+test('late password changes cannot replace another login or reset a detached form',async()=>{
+ for(const next of ['account','logout','view','stay']){
+  const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+  run(`state.authenticated=true;state.csrf='session-a';state.view='settings';
+   globalThis.messages=[];toast=message=>messages.push(message);
+   globalThis.resolvePassword=null;api=()=>new Promise(resolve=>resolvePassword=resolve);`);
+  formValues(run,{currentPassword:'Original-password',newPassword:'Changed-password',confirm:'Changed-password'});
+  const fixture=formEvent('password-form');let resets=0;fixture.event.target.reset=()=>resets++;
+  const saving=Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+  assert.equal(run('typeof resolvePassword'),'function');
+  fixture.event.target.isConnected=next==='stay';
+  if(next==='account')run("state.csrf='session-b';state.username='other-user';");
+  else if(next==='logout')run("state.authenticated=false;state.csrf='';");
+  else if(next==='view')run("state.view='papers';");
+  run("resolvePassword({csrf:'changed-session-a'})");await saving;
+  assert.equal(run('state.csrf'),next==='account'?'session-b':next==='logout'?'':'changed-session-a',next);
+  assert.equal(resets,next==='stay'?1:0,next);
+  assert.equal(run('messages.length'),['view','stay'].includes(next)?1:0,next);
+ }
+});
+
 test('an expired response from a previous login does not log out the current account',async()=>{
  const {run}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.authenticated=true;state.csrf='session-a';globalThis.resolveFetch=null;
@@ -734,7 +755,8 @@ test('resubmitting full and half papers appends a submission and retains the sel
   assert.equal(run('JSON.stringify(state.papers[0].submissions.slice(0,2))'),run('originalSubmissions'));
   assert.equal(run('state.papers[0].activeSubmissionId'),'new-submission');
   assert.equal(run('state.drawer'),null);assert.equal(run('state.view'),'submissions');
-  assert.match(nodes.get('#results').innerHTML,/改投新期刊/);assert.match(nodes.get('#results').innerHTML,/另一家期刊/);
+  assert.match(nodes.get('#results').innerHTML,/改投新期刊/);assert.doesNotMatch(nodes.get('#results').innerHTML,/另一家期刊/);
+  assert.equal(run('filteredSubmissions().length'),1);
  }
 });
 
@@ -1212,8 +1234,8 @@ test('home exposes only login and registration without confusing registration wi
  assert.match(nodes.get('#root').innerHTML,/获取验证码后完成注册/);
  await clickAction(handlers,{action:'auth-mode',mode:'login'});
  assert.match(nodes.get('#root').innerHTML,/value="&lt;script&gt;"/);
- run('renderShell()');assert.match(nodes.get('#root').innerHTML,/data-action="change-password"/);
- await clickAction(handlers,{action:'change-password'});
+ run('renderShell()');assert.doesNotMatch(nodes.get('#root').innerHTML,/data-action="change-password"|修改密码/);
+ await clickAction(handlers,{action:'navigate',view:'settings'});
  assert.equal(run('state.view'),'settings');assert.match(nodes.get('#content').innerHTML,/id="password-form"/);
 });
 
@@ -1342,6 +1364,46 @@ test('termination requires a selected paper and submitting the action opens conf
  assert.equal(fixture.submit.disabled,false);assert.equal(run('state.drawer.returnToSubmission.drawer.paper'),null);
 });
 
+test('terminated writing is displayed as stopped while retaining its original history',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`Object.assign(state.papers[0],{serviceStatus:'terminated',writer:'',writingStatus:'写作中',writingOverdue:true,
+  termination:{terminatedAt:today(),reason:'测试终止'}});`);
+ const row=run('managedPaperRow(state.papers[0],0)');
+ const writing=row.match(/<td data-label="写作安排 \/ 进度">([\s\S]*?)<\/td>/)[1];
+ assert.match(writing,/写作已终止/);assert.match(writing,/终止前状态：写作中/);
+ assert.doesNotMatch(writing,/尚未分配|已逾期|写作时长/);
+ assert.equal(run('state.papers[0].writingStatus'),'写作中');
+ run("state.drawer={kind:'detail',paper:state.papers[0],tab:'basic'};renderDetail()");
+ assert.match(nodes.get('#overlay-root').innerHTML,/写作已终止/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/终止前写作状态/);
+ const active=run('managedPaperRow(state.papers[1],1)');
+ assert.doesNotMatch(active,/写作已终止/);
+});
+
+test('submission lists counts pagination and exports count each paper once after repeated resubmission',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,2);state.view='submissions';state.tab='all';
+  const p=state.papers[0],first=p.submissions[0];
+  p.submissions=[{...first,status:'已拒稿',journal:'历史期刊甲'},
+   {...first,id:'second',status:'已拒稿',journal:'历史期刊乙'},
+   {...first,id:'latest',status:'审稿中',journal:'当前期刊',durationDays:35}];
+  p.activeSubmissionId='latest';state.papers[1].submissions[0].status='已录用';renderShell();`);
+ assert.equal(run('currentSubmissions().length'),2);
+ assert.equal(run('allSubmissions().length'),4);
+ assert.equal((nodes.get('#results').innerHTML.match(/<tr>/g)||[]).length,3);
+ assert.match(nodes.get('#content').innerHTML,/投稿论文总数/);
+ assert.match(nodes.get('#content').innerHTML,/全部投稿<span class="count">2<\/span>/);
+ assert.doesNotMatch(nodes.get('#results').innerHTML,/历史期刊甲|历史期刊乙/);
+ for(const tab of ['active','long','finished']){
+  run(`state.tab='${tab}'`);assert.equal(run('filteredSubmissions().length'),1,tab);
+ }
+ run("state.tab='all';download=(name,blob)=>{globalThis.uniqueExport=blob;};exportSubmissions()");
+ const csv=await run('uniqueExport').text();assert.equal(csv.trim().split('\n').length,3);
+ assert.doesNotMatch(csv,/历史期刊甲|历史期刊乙/);
+ assert.match(run('submissionHistory(state.papers[0])'),/历史期刊甲/);
+ run("state.papers[0].activeSubmissionId='missing'");assert.equal(run('currentSubmissions().length'),2);
+});
+
 test('terminated submissions can be filtered and exported while original journal statuses remain intact',async()=>{
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.papers=state.papers.slice(0,2);Object.assign(state.papers[0],{serviceStatus:'terminated',termination:{terminatedAt:today(),reason:'客户终止合作'}});
@@ -1351,16 +1413,17 @@ test('terminated submissions can be filtered and exported while original journal
  assert.match(nodes.get('#content').innerHTML,/<option >服务已终止<\/option>/);
  assert.match(nodes.get('#results').innerHTML,/终止前：<span class="badge blue">审稿中/);
  run("state.tab='active'");assert.equal(run('filteredSubmissions().length'),1);
- run("state.tab='finished'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.tab='terminated'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.tab='all';state.status='服务已终止'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.search='历史'");assert.equal(run('filteredSubmissions()[0].id'),'historical');
+ run("state.tab='finished'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.tab='terminated'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.tab='all';state.status='服务已终止'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.search='历史'");assert.equal(run('filteredSubmissions().length'),0);
+ run("state.search=''");
  run("download=(name,blob)=>{globalThis.exported={name,blob};};exportSubmissions()");
  const csv=await run('exported.blob').text();
  assert.match(csv,/服务状态/);assert.match(csv,/终止日期/);assert.match(csv,/终止原因/);
- assert.match(csv,/服务已终止/);assert.match(csv,/客户终止合作/);assert.match(csv,/已拒稿/);
+ assert.match(csv,/服务已终止/);assert.match(csv,/客户终止合作/);assert.match(csv,/审稿中/);assert.doesNotMatch(csv,/已拒稿/);
  assert.ok(!csv.includes('private-account'));assert.ok(!csv.includes('private@example.com'));
- run("state.search='';state.status='已拒稿'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.search='';state.status='已拒稿'");assert.equal(run('filteredSubmissions().length'),0);
  assert.equal(run('statuses.includes("终止服务")'),false);assert.equal(run('state.papers[0].submissions[0].status'),'审稿中');
 });
 
@@ -1493,6 +1556,26 @@ test('removed home password mode falls back to login and cannot submit password 
  assert.equal(run('messages.length'),0);
  assert.match(nodes.get('#root').innerHTML,/登录系统/);
  assert.ok(!nodes.get('#root').innerHTML.includes('Changed-password'));
+});
+
+test('empty workspace guides registration and a reset login never offers password recovery',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(nodes.get('#root').innerHTML,/当前没有可登录的账号，请先注册/);
+ assert.match(nodes.get('#root').innerHTML,/id="auth-recovery-entry"><button[^>]*data-mode="register"/);
+ const entry={innerHTML:''};nodes.set('#auth-recovery-entry',entry);
+ run("state.initialized=true;state.loginFailed=true;state.authMode='login';api=async()=>{const error=new Error('当前没有可登录的账号，请先点击“注册”创建账号。');error.status=409;error.code='REGISTRATION_REQUIRED';throw error;};");
+ formValues(run,{username:'previous-user',password:'Previous-password-2026'});
+ const {event,error,submit}=formEvent('auth-form','login');
+ await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+ assert.match(error.textContent,/注册/);assert.equal(submit.disabled,false);
+ assert.equal(run('state.initialized'),false);assert.equal(run('state.loginFailed'),false);
+ assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');
+ assert.match(entry.innerHTML,/data-action="auth-mode" data-mode="register"/);
+ assert.doesNotMatch(entry.innerHTML,/forgot-password/);
+ await clickAction(handlers,{action:'auth-mode',mode:'register'});
+ assert.match(nodes.get('#root').innerHTML,/data-mode="register"/);
+ assert.match(nodes.get('#root').innerHTML,/name="code"/);
+ assert.doesNotMatch(nodes.get('#root').innerHTML,/Previous-password-2026/);
 });
 
 test('login credential errors reveal email recovery while other failures do not',async()=>{
@@ -1670,15 +1753,136 @@ test('new paper and new writing actions open distinct half and full forms with t
  run('delete state.papers[0].serviceType;openEditor(state.papers[0])');
  assert.match(nodes.get('#overlay-root').innerHTML,/id="drawer-title">编辑记录（全包）<\/h2>/);
  run("state.drawer={kind:'customer-detail',customerTab:'papers',customer:{...state.customers[0],papers:state.papers}};renderCustomerDetail()");
- assert.match(nodes.get('#overlay-root').innerHTML,/data-action="navigate" data-view="papers" data-customer-id="customer-1"/);
+ assert.doesNotMatch(nodes.get('#overlay-root').innerHTML,/查看客户论文|data-action="navigate" data-view="papers"/);
  await clickAction(handlers,{action:'navigate',view:'papers',customerId:'customer-1'});
  assert.equal(run('state.customerId'),'customer-1');assert.equal(run('state.drawer'),null);
  assert.match(nodes.get('#content').innerHTML,/data-action="new-writing" data-customer-id="customer-1"/);
 });
 
+test('pagination uses compact numeric options and preserves manual preferences per module',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`globalThis.storageValues=new Map();globalThis.localStorage={getItem:key=>storageValues.get(key),setItem:(key,value)=>storageValues.set(key,value)};
+  window.innerHeight=900;window.scrollY=0;state.username='pagination-user';state.view='papers';`);
+ nodes.get('#results').getBoundingClientRect=()=>({top:500});
+ run("setPageSize('5')");assert.equal(run('state.pageSize'),5);assert.equal(run('state.page'),1);
+ assert.match(nodes.get('#results').innerHTML,/id="page-size"/);
+ const trigger=nodes.get('#results').innerHTML.match(/<button[^>]*id="page-size"[\s\S]*?<\/button>/)[0];
+ assert.match(trigger,/aria-label="每页 5 条"/);
+ assert.match(trigger,/aria-haspopup="listbox" aria-expanded="false"/);
+ assert.match(trigger,/<span>5<\/span>/);
+ assert.doesNotMatch(nodes.get('#results').innerHTML,/<select id="page-size"/);
+ assert.equal(run('storageValues.get("paper-desk:page-size:pagination-user:papers")'),'5');
+ run("window.innerHeight=700;pagination(100)");assert.equal(run('state.pageSize'),5);
+ run("state.view='customers';pagination(100)");assert.equal(run('pageSizePreference()'),8);
+ run("setPageSize('20');state.view='papers';pagination(100)");assert.equal(run('state.pageSize'),5);
+ run("delete pageSizePreferences[paginationKey()];pagination(100)");assert.equal(run('state.pageSize'),5);
+ await clickAction(handlers,{action:'page-size-option',pageSize:'10'});
+ assert.equal(run('state.pageSize'),10);
+ run("state.page=10;pagination(12)");assert.equal(run('state.page'),2);
+ run("state.page=-1;pagination(12)");assert.equal(run('state.page'),1);
+ run("setPageSize('999')");assert.equal(run('state.pageSize'),10);
+ run("localStorage={getItem(){throw Error('blocked');},setItem(){throw Error('blocked');}};setPageSize('20');pagination(0)");
+ assert.equal(run('state.page'),1);assert.ok(run('state.pageSize')>=3);
+});
+
+function pageSizePickerDom(harness) {
+ const {context,nodes,handlers}=harness,menus=[];
+ const fixture={anchor:{top:600,bottom:630,left:900,right:964},menus};
+ const trigger={id:'page-size',dataset:{action:'page-size-toggle'},disabled:false,isConnected:true,attributes:{},focusCount:0,
+  setAttribute(name,value){this.attributes[name]=value;},focus(){this.focusCount++;},
+  getBoundingClientRect:()=>fixture.anchor,contains(target){return target===this;},
+  closest(selector){return selector==='[data-action]'?this:null;}};
+ fixture.trigger=trigger;nodes.set('#page-size',trigger);
+ context.window.innerHeight=800;context.document.documentElement={clientWidth:1200};
+ context.document.createElement=()=>{
+  const options=[5,8,10,20,50,100].map(size=>({dataset:{action:'page-size-option',pageSize:String(size)},classes:new Set(),scrollCount:0,
+   scrollIntoView(){this.scrollCount++;},closest(selector){return selector==='[data-action]'?this:null;}}));
+  for(const option of options)option.classList={toggle(name,on){if(on)option.classes.add(name);else option.classes.delete(name);}};
+  const menu={innerHTML:'',style:{},attributes:{},options,isConnected:false,focusCount:0,
+   setAttribute(name,value){this.attributes[name]=value;},focus(){this.focusCount++;},remove(){this.isConnected=false;},
+   querySelectorAll(){return options;},getBoundingClientRect(){return {width:88,height:198};},
+   contains(target){return target===this||options.includes(target);}};
+  menus.push(menu);return menu;
+ };
+ context.document.body.append=menu=>{menu.isConnected=true;};
+ fixture.click=async target=>{for(const handler of handlers.get('click'))await handler({target});};
+ fixture.key=key=>{
+  const event={target:trigger,key,prevented:false,preventDefault(){this.prevented=true;}};
+  for(const handler of handlers.get('keydown'))handler(event);
+  return event;
+ };
+ return fixture;
+}
+
+test('page size popup shows centered numeric choices and applies selection with focus restored',async()=>{
+ const harness=app(),{run,nodes}=harness;await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ const picker=pageSizePickerDom(harness);
+ run("state.view='papers';state.page=2;renderResults()");
+ await picker.click(picker.trigger);
+ const menu=picker.menus.at(-1);
+ assert.equal(menu.isConnected,true);assert.equal(menu.attributes.role,'listbox');assert.equal(menu.focusCount,1);
+ assert.equal(picker.trigger.attributes['aria-expanded'],'true');
+ assert.deepEqual([...menu.innerHTML.matchAll(/data-page-size="(\d+)"/g)].map(match=>match[1]),['5','8','10','20','50','100']);
+ assert.match(menu.innerHTML,/id="page-size-option-8" role="option" aria-selected="true"/);
+ assert.equal(menu.attributes['aria-activedescendant'],'page-size-option-8');
+ assert.ok(menu.options[1].classes.has('is-active'));
+ await picker.click(menu.options[3]);
+ assert.equal(run('state.pageSize'),20);assert.equal(run('state.page'),1);
+ assert.equal(menu.isConnected,false);assert.equal(picker.trigger.attributes['aria-expanded'],'false');
+ assert.equal(picker.trigger.focusCount,1);assert.match(nodes.get('#results').innerHTML,/aria-label="每页 20 条"/);
+});
+
+test('page size popup supports keyboard selection, escape, tab and outside dismissal',async()=>{
+ const harness=app(),{run}=harness;await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ const picker=pageSizePickerDom(harness);
+ run("state.view='papers';renderResults()");
+ assert.equal(picker.key('ArrowDown').prevented,true);
+ picker.key('End');assert.equal(picker.menus.at(-1).attributes['aria-activedescendant'],'page-size-option-100');
+ picker.key('ArrowUp');assert.equal(picker.menus.at(-1).attributes['aria-activedescendant'],'page-size-option-50');
+ picker.key('Home');assert.equal(picker.menus.at(-1).attributes['aria-activedescendant'],'page-size-option-5');
+ picker.key('ArrowDown');picker.key('ArrowDown');picker.key('Enter');
+ assert.equal(run('state.pageSize'),10);assert.equal(run('pageSizeMenu'),null);
+ await picker.click(picker.trigger);picker.key('End');picker.key('Escape');
+ assert.equal(run('state.pageSize'),10);assert.equal(run('pageSizeMenu'),null);
+ await picker.click(picker.trigger);await picker.click(picker.trigger);assert.equal(run('pageSizeMenu'),null);
+ await picker.click(picker.trigger);assert.equal(picker.key('Tab').prevented,false);assert.equal(run('pageSizeMenu'),null);
+ await picker.click(picker.trigger);await picker.click({closest(){return null;}});assert.equal(run('pageSizeMenu'),null);
+ await picker.click(picker.trigger);run('renderResults()');assert.equal(run('pageSizeMenu'),null);
+ assert.equal(picker.menus.at(-1).isConnected,false);
+});
+
+test('page size popup fits above or below its trigger and stays inside narrow viewport edges',async()=>{
+ const harness=app(),{context,run}=harness;await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ const picker=pageSizePickerDom(harness);
+ run("state.view='papers';renderResults()");await picker.click(picker.trigger);
+ assert.equal(picker.menus.at(-1).style.top,'394px');assert.equal(picker.menus.at(-1).style.left,'876px');
+ picker.key('Escape');picker.anchor={top:20,bottom:50,left:4,right:68};
+ await picker.click(picker.trigger);
+ assert.equal(picker.menus.at(-1).style.top,'58px');assert.equal(picker.menus.at(-1).style.left,'12px');
+ picker.key('Escape');context.document.documentElement.clientWidth=320;context.window.innerHeight=190;
+ picker.anchor={top:100,bottom:130,left:290,right:354};await picker.click(picker.trigger);
+ assert.equal(picker.menus.at(-1).style.left,'220px');assert.equal(picker.menus.at(-1).style.top,'12px');
+ assert.equal(picker.menus.at(-1).style.maxHeight,'80px');
+});
+
+test('all list modules use selected page sizes with continuous numbering and clamped last pages',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.customers=Array.from({length:10},(_,i)=>({...state.customers[0],id:'customer-'+i}));");
+ for(const view of ['records','papers','submissions','customers','followups','finance']){
+  run(`state.view='${view}';state.tab='all';state.status='';state.search='';state.financeType='balances';state.page=1;setPageSize('5');`);
+  const html=nodes.get('#results').innerHTML;
+  if(html.includes('<table')){
+   assert.match(html,/id="page-size"/,view);
+   assert.equal((html.match(/<td class="sequence-cell">/g)||[]).length,5,view);
+   run('state.page=2;renderResults()');
+   assert.match(nodes.get('#results').innerHTML,/<td class="sequence-cell">6<\/td>/,view);
+  }
+ }
+});
+
 test('paper management includes half papers without treating them as writing tasks or exporting stale writing data',async()=>{
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
- run("Object.assign(state.papers[0],{serviceType:'half',title:'客户供稿的半包论文',writer:'半包旧写作人',writingStatus:'写作中',writingOverdue:true,writerFeeCents:999999999,payableCents:999999999});state.pageSize=20;state.view='papers';renderShell()");
+ run("Object.assign(state.papers[0],{serviceType:'half',title:'客户供稿的半包论文',writer:'半包旧写作人',writingStatus:'写作中',writingOverdue:true,writerFeeCents:999999999,payableCents:999999999});state.view='papers';pageSizePreferences[paginationKey()]=20;renderShell()");
  assert.equal(run('filteredManagedPapers().length'),10);
  assert.match(nodes.get('#results').innerHTML,/客户供稿的半包论文/);
  assert.match(nodes.get('#results').innerHTML,/无需安排写作/);
@@ -2257,22 +2461,23 @@ test('custom customer status menu supports keyboard selection, escape, and outsi
  assert.equal(run('state.drawer.paperStatusOpen'),false);assert.equal(run('state.drawer.customerTab'),'info');
 });
 
-test('customer paper summaries stay compact with many publication records and link to the full history',async()=>{
+test('customer paper summaries stay compact and retain title details without redundant shortcuts',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.papers[0].submissions=Array.from({length:100},(_,i)=>({id:'publication-'+i,status:'已发表',
   journal:i===99?'<script>期刊</script>':'期刊 '+i,publishedAt:i===99?'2026-11-01':'2026-01-01'}));
   state.drawer={kind:'customer-detail',customerTab:'papers',customer:{...state.customers[0],papers:[state.papers[0]]}};renderCustomerDetail();`);
  const html=nodes.get('#overlay-root').innerHTML;
  assert.equal([...html.matchAll(/class="customer-publication"/g)].length,1);
+ assert.doesNotMatch(html,/查看客户论文|投稿与成果|data-action="submission-detail"/);
  assert.ok(!html.includes('class="publication-line"'));
  assert.match(html,/共 100 次发表/);assert.match(html,/2026\.11\.01/);
  assert.match(html,/&lt;script&gt;期刊&lt;\/script&gt;/);assert.ok(!html.includes('<script>期刊'));
  run('api=async()=>state.papers[0]');
- await clickAction(handlers,{action:'submission-detail',paperId:'paper-0'});
- assert.equal(run('state.drawer.tab'),'submissions');assert.equal(run('state.drawer.paper.submissions.length'),100);
+ await clickAction(handlers,{action:'detail',id:'paper-0'});
+ assert.equal(run('state.drawer.kind'),'detail');assert.equal(run('state.drawer.paper.submissions.length'),100);
  run("state.drawer={kind:'customer-detail',customerTab:'papers',customer:{...state.customers[0],paperCount:0,papers:[]}};renderCustomerDetail()");
  assert.match(nodes.get('#overlay-root').innerHTML,/暂无关联论文/);
- assert.match(nodes.get('#overlay-root').innerHTML,/data-action="navigate" data-view="papers"/);
+ assert.doesNotMatch(nodes.get('#overlay-root').innerHTML,/查看客户论文|投稿与成果|data-action="navigate" data-view="papers"/);
 });
 
 test('writing fee entry separates terms, auto-calculated tail and newly recorded payments',()=>{

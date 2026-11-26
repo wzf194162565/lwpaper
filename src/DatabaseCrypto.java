@@ -35,6 +35,12 @@ public final class DatabaseCrypto {
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, Arrays.copyOf(bytes, 12))); cipher.updateAAD(id.getBytes(StandardCharsets.UTF_8));
         return new String(cipher.doFinal(bytes, 12, bytes.length - 12), StandardCharsets.UTF_8);
     }
+    public String encryptLoginPassword(String userId, String password) throws Exception {
+        return encrypt("login-password:" + userId, password);
+    }
+    public String decryptLoginPassword(String userId, String ciphertext) throws Exception {
+        return decrypt("login-password:" + userId, ciphertext);
+    }
     public static String hashPassword(String password) throws Exception {
         byte[] salt = random(16);
         return "pbkdf2_sha256$310000$" + Base64.getEncoder().encodeToString(salt) + "$" + Base64.getEncoder().encodeToString(derive(password, salt, 310000));

@@ -52,7 +52,7 @@ public final class MysqlStore implements ApplicationStore {
                 String space=UUID.randomUUID().toString(),id=UUID.randomUUID().toString(),member=UUID.randomUUID().toString();
                 execute(c,"INSERT INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",space,account+" 的工作空间");
                 execute(c,"INSERT INTO lw_storage_meta(workspace_id,key_fingerprint,business_schema,created_at) VALUES(?,?,2,UTC_TIMESTAMP(6))",space,crypto.fingerprint());
-                execute(c,"INSERT INTO lw_user(id,username,password_hash,status,version,created_at,updated_at) VALUES(?,?,?,'enabled',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",id,account,DatabaseCrypto.hashPassword(password));
+                execute(c,"INSERT INTO lw_user(id,username,password_hash,password_ciphertext,status,version,created_at,updated_at) VALUES(?,?,?,?,'enabled',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",id,account,DatabaseCrypto.hashPassword(password),crypto.encryptLoginPassword(id,password));
                 execute(c,"INSERT INTO lw_workspace_member(id,workspace_id,user_id,status,created_at) VALUES(?,?,?,'enabled',UTC_TIMESTAMP(6))",member,space,id);
                 execute(c,"INSERT INTO lw_member_role(member_id,role_code) VALUES(?,'administrator')",member);
                 c.commit();
@@ -93,7 +93,7 @@ public final class MysqlStore implements ApplicationStore {
         try(Connection c=config.connect(true)) {
             if(memberCount(c)==0) {
                 Path source=config.data.resolve("papers.vault");
-                if(!Files.exists(source))throw new ApiException(409,"请先初始化管理账号");
+                if(!Files.exists(source))throw new ApiException(409,"当前没有可登录的账号，请先点击“注册”创建账号。");
                 byte[] encoded=Files.readAllBytes(source);Map<String,Object> imported;
                 try{imported=Vault.readBackup(encoded,password);}catch(ApiException e){throw new ApiException(401,"账号或密码不正确，或原数据文件已损坏");}
                 String savedAccount=Main.string(imported,"username");
@@ -105,11 +105,16 @@ public final class MysqlStore implements ApplicationStore {
                 initializeAccount(imported,account,password,HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(encoded)));
             }
         }
-        try(Connection c=config.connect(true);PreparedStatement statement=c.prepareStatement("SELECT u.id,u.username,u.password_hash FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE m.workspace_id=? AND u.username=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator'")) {
+        try(Connection c=config.connect(true);PreparedStatement statement=c.prepareStatement("SELECT u.id,u.username,u.password_hash,u.password_ciphertext FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE m.workspace_id=? AND u.username=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator'")) {
             statement.setString(1,workspace);statement.setString(2,account);
             try(ResultSet rs=statement.executeQuery()) {
                 if(!rs.next()||!DatabaseCrypto.verifyPassword(password,rs.getString("password_hash")))throw new ApiException(401,"账号或密码不正确");
-                userId=rs.getString("id");username=rs.getString("username");backupCipher=new Vault.BackupCipher(password);
+                String verifiedId=rs.getString("id"),verifiedHash=rs.getString("password_hash");
+                if(rs.getString("password_ciphertext").isEmpty()) {
+                    // A concurrent password change must not receive a copy of the previous password.
+                    execute(c,"UPDATE lw_user SET password_ciphertext=? WHERE id=? AND password_hash=? AND password_ciphertext=''",crypto.encryptLoginPassword(verifiedId,password),verifiedId,verifiedHash);
+                }
+                userId=verifiedId;username=rs.getString("username");backupCipher=new Vault.BackupCipher(password);
             }
         }
     }
@@ -137,7 +142,7 @@ public final class MysqlStore implements ApplicationStore {
             try{
                 lock(c);requireAccount(c);String saved=scalar(c,"SELECT password_hash FROM lw_user WHERE id=? FOR UPDATE",userId);
                 if(!DatabaseCrypto.verifyPassword(current,saved))throw new ApiException(401,"当前密码不正确");
-                execute(c,"UPDATE lw_user SET password_hash=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",DatabaseCrypto.hashPassword(next),userId);
+                execute(c,"UPDATE lw_user SET password_hash=?,password_ciphertext=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",DatabaseCrypto.hashPassword(next),crypto.encryptLoginPassword(userId,next),userId);
                 c.commit();backupCipher=new Vault.BackupCipher(next);
             }catch(Exception e){rollback(c);throw e;}
         }
@@ -161,7 +166,7 @@ public final class MysqlStore implements ApplicationStore {
             try {
                 String id=scalar(c,"SELECT u.id FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE u.username=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator' FOR UPDATE",account);
                 if(id.isEmpty())throw new ApiException(400,"验证码不正确或已失效，请重新获取");
-                execute(c,"UPDATE lw_user SET password_hash=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",DatabaseCrypto.hashPassword(next),id);c.commit();
+                execute(c,"UPDATE lw_user SET password_hash=?,password_ciphertext=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",DatabaseCrypto.hashPassword(next),crypto.encryptLoginPassword(id,next),id);c.commit();
             }catch(Exception error){rollback(c);throw error;}
         }
         return loginAccount(account,next);
@@ -216,7 +221,7 @@ public final class MysqlStore implements ApplicationStore {
                 if(memberCount(c)>0)throw new ApiException(409,"数据库已初始化，未覆盖现有账号或业务记录，请直接登录");
                 if(sourceHash!=null)importLegacyFiles(state);
                 String id=UUID.randomUUID().toString(),member=UUID.randomUUID().toString();
-                execute(c,"INSERT INTO lw_user(id,username,password_hash,status,version,created_at,updated_at) VALUES(?,?,?,'enabled',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",id,account,DatabaseCrypto.hashPassword(password));
+                execute(c,"INSERT INTO lw_user(id,username,password_hash,password_ciphertext,status,version,created_at,updated_at) VALUES(?,?,?,?,'enabled',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",id,account,DatabaseCrypto.hashPassword(password),crypto.encryptLoginPassword(id,password));
                 execute(c,"INSERT INTO lw_workspace_member(id,workspace_id,user_id,status,created_at) VALUES(?,?,?,'enabled',UTC_TIMESTAMP(6))",member,workspace,id);
                 execute(c,"INSERT INTO lw_member_role(member_id,role_code) VALUES(?,'administrator')",member);
                 mapper.writeChanges(c,emptyState(account),state);
@@ -277,6 +282,7 @@ public final class MysqlStore implements ApplicationStore {
                 migrateExpectedPublication(c);
                 migrateFollowUpTasks(c);
                 migrateRecoveryEmail(c);
+                migrateLoginPasswordCopy(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -338,6 +344,14 @@ public final class MysqlStore implements ApplicationStore {
         try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
         if(scalar(c,"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_submission' AND column_name='manuscript_id'").equals("0"))
             try(Statement statement=c.createStatement()){statement.execute("ALTER TABLE lw_submission ADD COLUMN manuscript_id VARCHAR(36) NOT NULL DEFAULT '' COMMENT '本次投稿使用的论文文件版本 UUID'");}
+        // Recreating the V005 table must also restore extensions from an already installed V010.
+        if(!scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=10").isEmpty()) {
+            String extensions=Files.readString(config.root.resolve("db/mysql/V010__submission_costs_and_financial_audit.sql"),StandardCharsets.UTF_8);
+            try(Statement statement=c.createStatement()) {
+                for(String sql:extensions.split(";"))if(sql.stripLeading().startsWith("ALTER TABLE lw_paper_file "))try{statement.execute(sql);}
+                catch(SQLException e){if(!Set.of(1060,1061,1091).contains(e.getErrorCode()))throw e;}
+            }
+        }
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(5,?,?,UTC_TIMESTAMP(6))","论文文件与稿件版本",checksum);
     }
     private void migrateFollowUpTasks(Connection c) throws Exception {
@@ -357,6 +371,17 @@ public final class MysqlStore implements ApplicationStore {
         if(column.isEmpty())try(Statement statement=c.createStatement()){statement.execute(script);}
         else if(!column.equals("varchar:254:NO:"))throw new IllegalStateException("账号找回邮箱字段格式不兼容");
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(14,?,?,UTC_TIMESTAMP(6))","账号密码找回邮箱",checksum);
+    }
+
+    private void migrateLoginPasswordCopy(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V015__login_password_copy.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=15");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V015 数据库迁移脚本校验不一致");return;}
+        String column=scalar(c,"SELECT CONCAT(data_type,':',character_maximum_length,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_user' AND column_name='password_ciphertext'");
+        if(column.isEmpty())try(Statement statement=c.createStatement()){statement.execute(script);}
+        else if(!column.equals("varchar:1024:NO:"))throw new IllegalStateException("登录密码加密副本字段格式不兼容");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(15,?,?,UTC_TIMESTAMP(6))","登录密码加密副本",checksum);
     }
 
     private void migrateExpectedPublication(Connection c) throws Exception {
