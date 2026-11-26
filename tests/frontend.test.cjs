@@ -575,6 +575,27 @@ test('late save responses update records without closing a newer editor or reset
  }
 });
 
+test('late password changes cannot replace another login or reset a detached form',async()=>{
+ for(const next of ['account','logout','view','stay']){
+  const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+  run(`state.authenticated=true;state.csrf='session-a';state.view='settings';
+   globalThis.messages=[];toast=message=>messages.push(message);
+   globalThis.resolvePassword=null;api=()=>new Promise(resolve=>resolvePassword=resolve);`);
+  formValues(run,{currentPassword:'Original-password',newPassword:'Changed-password',confirm:'Changed-password'});
+  const fixture=formEvent('password-form');let resets=0;fixture.event.target.reset=()=>resets++;
+  const saving=Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+  assert.equal(run('typeof resolvePassword'),'function');
+  fixture.event.target.isConnected=next==='stay';
+  if(next==='account')run("state.csrf='session-b';state.username='other-user';");
+  else if(next==='logout')run("state.authenticated=false;state.csrf='';");
+  else if(next==='view')run("state.view='papers';");
+  run("resolvePassword({csrf:'changed-session-a'})");await saving;
+  assert.equal(run('state.csrf'),next==='account'?'session-b':next==='logout'?'':'changed-session-a',next);
+  assert.equal(resets,next==='stay'?1:0,next);
+  assert.equal(run('messages.length'),['view','stay'].includes(next)?1:0,next);
+ }
+});
+
 test('an expired response from a previous login does not log out the current account',async()=>{
  const {run}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.authenticated=true;state.csrf='session-a';globalThis.resolveFetch=null;
@@ -734,7 +755,8 @@ test('resubmitting full and half papers appends a submission and retains the sel
   assert.equal(run('JSON.stringify(state.papers[0].submissions.slice(0,2))'),run('originalSubmissions'));
   assert.equal(run('state.papers[0].activeSubmissionId'),'new-submission');
   assert.equal(run('state.drawer'),null);assert.equal(run('state.view'),'submissions');
-  assert.match(nodes.get('#results').innerHTML,/改投新期刊/);assert.match(nodes.get('#results').innerHTML,/另一家期刊/);
+  assert.match(nodes.get('#results').innerHTML,/改投新期刊/);assert.doesNotMatch(nodes.get('#results').innerHTML,/另一家期刊/);
+  assert.equal(run('filteredSubmissions().length'),1);
  }
 });
 
@@ -1342,6 +1364,46 @@ test('termination requires a selected paper and submitting the action opens conf
  assert.equal(fixture.submit.disabled,false);assert.equal(run('state.drawer.returnToSubmission.drawer.paper'),null);
 });
 
+test('terminated writing is displayed as stopped while retaining its original history',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`Object.assign(state.papers[0],{serviceStatus:'terminated',writer:'',writingStatus:'写作中',writingOverdue:true,
+  termination:{terminatedAt:today(),reason:'测试终止'}});`);
+ const row=run('managedPaperRow(state.papers[0],0)');
+ const writing=row.match(/<td data-label="写作安排 \/ 进度">([\s\S]*?)<\/td>/)[1];
+ assert.match(writing,/写作已终止/);assert.match(writing,/终止前状态：写作中/);
+ assert.doesNotMatch(writing,/尚未分配|已逾期|写作时长/);
+ assert.equal(run('state.papers[0].writingStatus'),'写作中');
+ run("state.drawer={kind:'detail',paper:state.papers[0],tab:'basic'};renderDetail()");
+ assert.match(nodes.get('#overlay-root').innerHTML,/写作已终止/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/终止前写作状态/);
+ const active=run('managedPaperRow(state.papers[1],1)');
+ assert.doesNotMatch(active,/写作已终止/);
+});
+
+test('submission lists counts pagination and exports count each paper once after repeated resubmission',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.papers=state.papers.slice(0,2);state.view='submissions';state.tab='all';
+  const p=state.papers[0],first=p.submissions[0];
+  p.submissions=[{...first,status:'已拒稿',journal:'历史期刊甲'},
+   {...first,id:'second',status:'已拒稿',journal:'历史期刊乙'},
+   {...first,id:'latest',status:'审稿中',journal:'当前期刊',durationDays:35}];
+  p.activeSubmissionId='latest';state.papers[1].submissions[0].status='已录用';renderShell();`);
+ assert.equal(run('currentSubmissions().length'),2);
+ assert.equal(run('allSubmissions().length'),4);
+ assert.equal((nodes.get('#results').innerHTML.match(/<tr>/g)||[]).length,3);
+ assert.match(nodes.get('#content').innerHTML,/投稿论文总数/);
+ assert.match(nodes.get('#content').innerHTML,/全部投稿<span class="count">2<\/span>/);
+ assert.doesNotMatch(nodes.get('#results').innerHTML,/历史期刊甲|历史期刊乙/);
+ for(const tab of ['active','long','finished']){
+  run(`state.tab='${tab}'`);assert.equal(run('filteredSubmissions().length'),1,tab);
+ }
+ run("state.tab='all';download=(name,blob)=>{globalThis.uniqueExport=blob;};exportSubmissions()");
+ const csv=await run('uniqueExport').text();assert.equal(csv.trim().split('\n').length,3);
+ assert.doesNotMatch(csv,/历史期刊甲|历史期刊乙/);
+ assert.match(run('submissionHistory(state.papers[0])'),/历史期刊甲/);
+ run("state.papers[0].activeSubmissionId='missing'");assert.equal(run('currentSubmissions().length'),2);
+});
+
 test('terminated submissions can be filtered and exported while original journal statuses remain intact',async()=>{
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
  run(`state.papers=state.papers.slice(0,2);Object.assign(state.papers[0],{serviceStatus:'terminated',termination:{terminatedAt:today(),reason:'客户终止合作'}});
@@ -1351,16 +1413,17 @@ test('terminated submissions can be filtered and exported while original journal
  assert.match(nodes.get('#content').innerHTML,/<option >服务已终止<\/option>/);
  assert.match(nodes.get('#results').innerHTML,/终止前：<span class="badge blue">审稿中/);
  run("state.tab='active'");assert.equal(run('filteredSubmissions().length'),1);
- run("state.tab='finished'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.tab='terminated'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.tab='all';state.status='服务已终止'");assert.equal(run('filteredSubmissions().length'),2);
- run("state.search='历史'");assert.equal(run('filteredSubmissions()[0].id'),'historical');
+ run("state.tab='finished'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.tab='terminated'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.tab='all';state.status='服务已终止'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.search='历史'");assert.equal(run('filteredSubmissions().length'),0);
+ run("state.search=''");
  run("download=(name,blob)=>{globalThis.exported={name,blob};};exportSubmissions()");
  const csv=await run('exported.blob').text();
  assert.match(csv,/服务状态/);assert.match(csv,/终止日期/);assert.match(csv,/终止原因/);
- assert.match(csv,/服务已终止/);assert.match(csv,/客户终止合作/);assert.match(csv,/已拒稿/);
+ assert.match(csv,/服务已终止/);assert.match(csv,/客户终止合作/);assert.match(csv,/审稿中/);assert.doesNotMatch(csv,/已拒稿/);
  assert.ok(!csv.includes('private-account'));assert.ok(!csv.includes('private@example.com'));
- run("state.search='';state.status='已拒稿'");assert.equal(run('filteredSubmissions().length'),1);
+ run("state.search='';state.status='已拒稿'");assert.equal(run('filteredSubmissions().length'),0);
  assert.equal(run('statuses.includes("终止服务")'),false);assert.equal(run('state.papers[0].submissions[0].status'),'审稿中');
 });
 
@@ -1676,9 +1739,48 @@ test('new paper and new writing actions open distinct half and full forms with t
  assert.match(nodes.get('#content').innerHTML,/data-action="new-writing" data-customer-id="customer-1"/);
 });
 
+test('pagination uses compact numeric options and preserves manual preferences per module',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`globalThis.storageValues=new Map();globalThis.localStorage={getItem:key=>storageValues.get(key),setItem:(key,value)=>storageValues.set(key,value)};
+  window.innerHeight=900;window.scrollY=0;state.username='pagination-user';state.view='papers';`);
+ nodes.get('#results').getBoundingClientRect=()=>({top:500});
+ run("setPageSize('5')");assert.equal(run('state.pageSize'),5);assert.equal(run('state.page'),1);
+ assert.match(nodes.get('#results').innerHTML,/id="page-size"/);
+ const select=nodes.get('#results').innerHTML.match(/<select id="page-size"[\s\S]*?<\/select>/)[0];
+ assert.doesNotMatch(select,/自动|条/);
+ assert.match(nodes.get('#results').innerHTML,/<\/select> 条<\/label>/);
+ assert.equal(run('storageValues.get("paper-desk:page-size:pagination-user:papers")'),'5');
+ run("window.innerHeight=700;pagination(100)");assert.equal(run('state.pageSize'),5);
+ run("state.view='customers';pagination(100)");assert.equal(run('pageSizePreference()'),8);
+ run("setPageSize('20');state.view='papers';pagination(100)");assert.equal(run('state.pageSize'),5);
+ run("delete pageSizePreferences[paginationKey()];pagination(100)");assert.equal(run('state.pageSize'),5);
+ await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'page-size',value:'10'}})));
+ assert.equal(run('state.pageSize'),10);
+ run("state.page=10;pagination(12)");assert.equal(run('state.page'),2);
+ run("state.page=-1;pagination(12)");assert.equal(run('state.page'),1);
+ run("setPageSize('999')");assert.equal(run('state.pageSize'),10);
+ run("localStorage={getItem(){throw Error('blocked');},setItem(){throw Error('blocked');}};setPageSize('20');pagination(0)");
+ assert.equal(run('state.page'),1);assert.ok(run('state.pageSize')>=3);
+});
+
+test('all list modules use selected page sizes with continuous numbering and clamped last pages',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.customers=Array.from({length:10},(_,i)=>({...state.customers[0],id:'customer-'+i}));");
+ for(const view of ['records','papers','submissions','customers','followups','finance']){
+  run(`state.view='${view}';state.tab='all';state.status='';state.search='';state.financeType='balances';state.page=1;setPageSize('5');`);
+  const html=nodes.get('#results').innerHTML;
+  if(html.includes('<table')){
+   assert.match(html,/id="page-size"/,view);
+   assert.equal((html.match(/<td class="sequence-cell">/g)||[]).length,5,view);
+   run('state.page=2;renderResults()');
+   assert.match(nodes.get('#results').innerHTML,/<td class="sequence-cell">6<\/td>/,view);
+  }
+ }
+});
+
 test('paper management includes half papers without treating them as writing tasks or exporting stale writing data',async()=>{
  const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
- run("Object.assign(state.papers[0],{serviceType:'half',title:'客户供稿的半包论文',writer:'半包旧写作人',writingStatus:'写作中',writingOverdue:true,writerFeeCents:999999999,payableCents:999999999});state.pageSize=20;state.view='papers';renderShell()");
+ run("Object.assign(state.papers[0],{serviceType:'half',title:'客户供稿的半包论文',writer:'半包旧写作人',writingStatus:'写作中',writingOverdue:true,writerFeeCents:999999999,payableCents:999999999});state.view='papers';pageSizePreferences[paginationKey()]=20;renderShell()");
  assert.equal(run('filteredManagedPapers().length'),10);
  assert.match(nodes.get('#results').innerHTML,/客户供稿的半包论文/);
  assert.match(nodes.get('#results').innerHTML,/无需安排写作/);

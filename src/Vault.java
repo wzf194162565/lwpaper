@@ -131,8 +131,7 @@ public final class Vault implements ApplicationStore {
             try(FileChannel channel=FileChannel.open(temporary,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING,StandardOpenOption.WRITE)) {
                 ByteBuffer buffer=ByteBuffer.wrap(encoded);while(buffer.hasRemaining())channel.write(buffer);channel.force(true);
             }
-            try { Files.move(temporary,recoveryFile(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
-            catch(AtomicMoveNotSupportedException error) { Files.move(temporary,recoveryFile(),StandardCopyOption.REPLACE_EXISTING); }
+            replaceFile(temporary,recoveryFile());
         } finally { Files.deleteIfExists(temporary); }
     }
     private void persist(Map<String, Object> next, SecretKey nextKey, byte[] nextSalt) throws Exception {
@@ -145,9 +144,8 @@ public final class Vault implements ApplicationStore {
                 while (buffer.hasRemaining()) channel.write(buffer);
                 channel.force(true);
             }
-            if (Files.exists(file)) Files.copy(file, file.resolveSibling("papers.vault.bak"), StandardCopyOption.REPLACE_EXISTING);
-            try { Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
-            catch (AtomicMoveNotSupportedException e) { Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING); }
+            if (Files.exists(file)) retryFileOperation(()->Files.copy(file, file.resolveSibling("papers.vault.bak"), StandardCopyOption.REPLACE_EXISTING));
+            replaceFile(temporary,file);
         } finally { Files.deleteIfExists(temporary); }
     }
     private static byte[] encode(Map<String, Object> data, SecretKey key, byte[] salt) throws Exception {
@@ -171,6 +169,26 @@ public final class Vault implements ApplicationStore {
         PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, ROUNDS, 256);
         try { return new SecretKeySpec(SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded(), "AES"); }
         finally { spec.clearPassword(); }
+    }
+    @FunctionalInterface interface FileOperation { void run() throws java.io.IOException; }
+    static void retryFileOperation(FileOperation operation) throws java.io.IOException {
+        for(int attempt=0;;attempt++) {
+            try { operation.run();return; }
+            catch(AccessDeniedException error) {
+                if(attempt>=3)throw error;
+                try { Thread.sleep(50L*(attempt+1)); }
+                catch(InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.IOException("File save interrupted",interrupted);
+                }
+            }
+        }
+    }
+    private static void replaceFile(Path source,Path target) throws java.io.IOException {
+        retryFileOperation(()->{
+            try { Files.move(source,target,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
+            catch(AtomicMoveNotSupportedException error) { Files.move(source,target,StandardCopyOption.REPLACE_EXISTING); }
+        });
     }
     static void validateState(Map<String, Object> data) {
         try {

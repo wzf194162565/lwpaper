@@ -224,7 +224,7 @@ function renderContent() {
  if (state.view === 'finance') return renderFinance();
  const followups = state.view === 'followups';
  const tabs = followups ? [['all','全部计划',followUpPlans().length],['due','到期待跟进',state.papers.filter(due).length],['upcoming','未来 7 天',upcoming().length]] : [['all','全部记录',state.papers.length],['active','进行中',state.papers.filter(paperInProgress).length],['due','到期待跟进',state.papers.filter(due).length],['accepted','已录用',state.papers.filter(accepted).length],['published','已发表',state.papers.filter(published).length],['finished','已归档',state.papers.filter(terminal).length]];
- $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down')+(followups?'':btn('navigate','查看论文管理','document','','data-view="papers"')))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用单独归入“已录用”，不计入“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
+ $('#content').innerHTML = `${pageHeading(followups ? '待跟进事项' : '论文总览',followups ? '把握投稿节点，让需要关注的事情一目了然。' : '每一篇论文，每一个进展，都有迹可循。',btn('export-papers','导出记录','down'))}${followups?followUpStats():stats()}<section class="panel"><div class="panel-header"><h2 class="panel-title">${followups ? '跟进计划' : '论文记录'} <small>${followups ? 'FOLLOW-UPS' : 'SUBMISSION RECORDS'}</small></h2><button class="text-btn" data-action="refresh" title="刷新记录">${icon('refresh')}刷新</button></div><div class="tab-bar overview-tabs" role="tablist">${tabs.map(([id,label,count])=>`<button class="tab ${state.tab===id?'active':''}" data-action="tab" data-tab="${id}" role="tab" aria-selected="${state.tab===id}">${label}<span class="count">${count}</span></button>`).join('')}</div>${followups?'':'<p class="overview-classification-note">分类按当前投稿状态统计：已发表或已撤稿自动归入“已归档”，已录用单独归入“已录用”，不计入“进行中”。服务已终止的论文也归档保留，原投稿状态不变。</p>'}<div class="filter-row"><div class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索题目、客户、期刊或跟进事项…" aria-label="搜索论文" value="${esc(state.search)}"></div><select id="status-filter" aria-label="投稿状态"><option value="">全部投稿状态</option>${statuses.map(s=>`<option ${state.status===s?'selected':''}>${s}</option>`).join('')}</select><span class="filter-label">投稿日期</span><input class="date-filter" id="from-filter" type="date" aria-label="投稿起始日期" value="${esc(state.from)}"><span class="date-sep">至</span><input class="date-filter" id="to-filter" type="date" aria-label="投稿截止日期" value="${esc(state.to)}">${btn('clear-filters','重置','','')}</div><div id="results"></div></section>${followups ? '' : overviewPanels()}${footer()}`;
  renderPaperResults();
 }
 function upcoming() { const end = new Date(); end.setDate(end.getDate()+7); const day = `${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`; return followUpPlans().filter(p=>p.followUpAt>today()&&p.followUpAt<=day); }
@@ -252,15 +252,50 @@ function filteredPapers() {
 function emptyState(filtered=false, label='论文') {
  if(state.view==='followups'){
   const hasFilters=Boolean(state.search.trim()||state.status||state.from||state.to||state.tab!=='all');
-  return `<div class="empty-state"><div class="empty-illustration">${icon('calendar')}</div><h3>${hasFilters?'没有符合条件的跟进事项':'暂无跟进计划'}</h3><p>${hasFilters?'调整筛选条件，查看其他跟进计划。':'可在已有论文中设置跟进日期及事项，到期后会在这里提醒。'}</p>${hasFilters?btn('clear-filters','重置筛选','refresh'):btn('navigate','查看论文','document','','data-view="papers"')}</div>`;
+  return `<div class="empty-state"><div class="empty-illustration">${icon('calendar')}</div><h3>${hasFilters?'没有符合条件的跟进事项':'暂无跟进计划'}</h3><p>${hasFilters?'调整筛选条件，查看其他跟进计划。':'可在已有论文中设置跟进日期及事项，到期后会在这里提醒。'}</p>${hasFilters?btn('clear-filters','重置筛选','refresh'):btn('navigate','查看论文','document','primary','data-view="papers"')}</div>`;
  }
- return `<div class="empty-state"><div class="empty-illustration">${icon(filtered?'search':'document')}</div><h3>${filtered?'没有找到符合条件的记录':`还没有${label}记录`}</h3><p>${filtered?'试试其他关键词，或重置筛选条件。':'请在论文管理中建立论文档案，再查看投稿进度和收支记录。'}</p>${filtered?btn('clear-filters','重置筛选','refresh'):btn('navigate','前往论文管理','document','','data-view="papers"')}</div>`;
+ return `<div class="empty-state"><div class="empty-illustration">${icon(filtered?'search':'document')}</div><h3>${filtered?'没有找到符合条件的记录':`还没有${label}记录`}</h3><p>${filtered?'试试其他关键词，或重置筛选条件。':'请在论文管理中建立论文档案，再查看投稿进度和收支记录。'}</p>${filtered?btn('clear-filters','重置筛选','refresh'):btn('navigate','前往论文管理','document','primary','data-view="papers"')}</div>`;
 }
+const pageSizeOptions=[5,8,10,20,50,100];
+const pageSizePreferences={};
+function paginationKey() { return `${state.username}:${state.view}${state.view==='finance'?':'+state.financeType:''}`; }
+function pageSizePreference() {
+ const key=paginationKey();
+ if(Object.hasOwn(pageSizePreferences,key))return pageSizePreferences[key];
+ try { const saved=localStorage.getItem('paper-desk:page-size:'+key);pageSizePreferences[key]=pageSizeOptions.includes(Number(saved))?Number(saved):8; }
+ catch { pageSizePreferences[key]=8; }
+ return pageSizePreferences[key];
+}
+function updatePageSize() {
+ const next=pageSizePreference();
+ if(next!==state.pageSize) {
+  const first=(Math.max(1,state.page)-1)*state.pageSize;
+  state.pageSize=next;state.page=Math.floor(first/next)+1;
+ }
+ const results=$('#results');
+ if(Number.isFinite(window.innerHeight)) {
+  const top=(results?.getBoundingClientRect?.().top??500)+(window.scrollY||0);
+  results?.style?.setProperty?.('--table-max-height',Math.max(240,window.innerHeight-top-96)+'px');
+ }
+}
+function setPageSize(value) {
+ const preference=Number(value);
+ if(!pageSizeOptions.includes(preference))return;
+ pageSizePreferences[paginationKey()]=preference;
+ try { localStorage.setItem('paper-desk:page-size:'+paginationKey(),String(preference)); } catch {}
+ state.page=1;updatePageSize();state.page=1;renderResults();
+}
+let paginationResizeTimer;
+window.addEventListener('resize',()=>{
+ clearTimeout(paginationResizeTimer);
+ paginationResizeTimer=setTimeout(()=>{if(state.authenticated&&!state.drawer&&!state.modal&&$('#results')){updatePageSize();renderResults();}},150);
+});
 function pagination(total) {
- const pages = Math.max(1,Math.ceil(total/state.pageSize)); state.page = Math.min(state.page,pages);
- const visible = Array.from({length:pages},(_,i)=>i+1).filter(p=>p===1||p===pages||Math.abs(p-state.page)<=1);
+ updatePageSize();
+ const pages = Math.max(1,Math.ceil(total/state.pageSize)); state.page = Math.max(1,Math.min(Number.isFinite(state.page)?Math.floor(state.page):1,pages));
+ const visible = [...new Set([1,state.page-1,state.page,state.page+1,pages])].filter(p=>p>=1&&p<=pages).sort((a,b)=>a-b);
  let last=0;
- return `<div class="table-footer"><span>共 ${total} 条记录${total?`，显示 ${(state.page-1)*state.pageSize+1}–${Math.min(state.page*state.pageSize,total)} 条`:''}</span><div class="pagination"><button class="page-btn" data-action="page" data-page="${state.page-1}" ${state.page<=1?'disabled':''} aria-label="上一页">${icon('left')}</button>${visible.map(p=>{const gap=p-last>1?'<span>…</span>':'';last=p;return `${gap}<button class="page-btn ${p===state.page?'active':''}" data-action="page" data-page="${p}" aria-label="第 ${p} 页" ${p===state.page?'aria-current="page"':''}>${p}</button>`;}).join('')}<button class="page-btn" data-action="page" data-page="${state.page+1}" ${state.page>=pages?'disabled':''} aria-label="下一页">${icon('chevron')}</button></div></div>`;
+ return `<div class="table-footer"><span>共 ${total} 条记录${total?`，显示 ${(state.page-1)*state.pageSize+1}–${Math.min(state.page*state.pageSize,total)} 条`:''}</span><div class="pagination-controls"><label class="page-size-control" for="page-size">每页 <select id="page-size" aria-label="每页数据量">${pageSizeOptions.map(size=>`<option value="${size}" ${pageSizePreference()===size?'selected':''}>${size}</option>`).join('')}</select> 条</label><nav class="pagination" aria-label="分页导航"><button class="page-btn" data-action="page" data-page="${state.page-1}" ${state.page<=1?'disabled':''} aria-label="上一页">${icon('left')}</button>${visible.map(p=>{const gap=p-last>1?'<span>…</span>':'';last=p;return `${gap}<button class="page-btn ${p===state.page?'active':''}" data-action="page" data-page="${p}" aria-label="第 ${p} 页" ${p===state.page?'aria-current="page"':''}>${p}</button>`;}).join('')}<button class="page-btn" data-action="page" data-page="${state.page+1}" ${state.page>=pages?'disabled':''} aria-label="下一页">${icon('chevron')}</button></nav></div></div>`;
 }
 function sequenceCell(index) {
  return `<td class="sequence-cell">${(state.page-1)*state.pageSize+index+1}</td>`;
@@ -378,7 +413,7 @@ function renderFinanceResults() {
  if(state.from&&state.to&&state.from>state.to){$('#results').innerHTML='<div class="empty-state"><h3>起始日期不能晚于截止日期</h3></div>';return;}
  if(!txs.length) {
   const hasTransactions=allTransactions().length>0;
-  $('#results').innerHTML=`<div class="empty-state"><div class="empty-illustration">${icon('wallet')}</div><h3>${hasTransactions?'没有符合条件的流水':'还没有收支流水'}</h3><p>${hasTransactions?'试试其他关键词、收支日期或分类。':'费用约定与待收待付可在“应收应付”中查看。实际收付款需进入论文详情逐笔登记。'}</p>${hasTransactions?btn('clear-filters','重置筛选','refresh'):btn('finance-tab','查看应收应付','chevron','','data-type="balances"')}</div>`;
+  $('#results').innerHTML=`<div class="empty-state"><div class="empty-illustration">${icon('wallet')}</div><h3>${hasTransactions?'没有符合条件的流水':'还没有收支流水'}</h3><p>${hasTransactions?'试试其他关键词、收支日期或分类。':'费用约定与待收待付可在“应收应付”中查看。实际收付款需进入论文详情逐笔登记。'}</p>${hasTransactions?btn('clear-filters','重置筛选','refresh'):btn('finance-tab','查看应收应付','chevron','primary','data-type="balances"')}</div>`;
   return;
  }
  $('#results').innerHTML = `<div class="results-note">当前筛选：收入 ${yuan(txs.filter(t=>t.type.startsWith('incoming')).reduce((n,t)=>n+transactionAmount(t),0))} &nbsp; · &nbsp; 支出 ${yuan(txs.filter(t=>t.type.startsWith('outgoing')).reduce((n,t)=>n+transactionAmount(t),0))}</div><div class="table-scroll"><table><thead><tr><th class="sequence-cell" scope="col">序号</th><th>收支日期</th><th>关联论文</th><th>客户 / 写作者</th><th>收支类型</th><th>金额</th><th>收付方式 / 备注</th><th>操作</th></tr></thead><tbody>${txs.slice((state.page-1)*state.pageSize,state.page*state.pageSize).map((tx,index)=>`<tr>${sequenceCell(index)}<td>${dateLabel(tx.date)}</td><td class="paper-cell"><button class="paper-title" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${esc(tx.paper.title)}</button><div class="paper-meta">${esc(tx.paper.code)}</div></td><td>${esc(publicationTypes.includes(tx.type)?tx.paper.journal||'期刊':['outgoing_refund','incoming_settlement','incoming_deposit','incoming_balance'].includes(tx.type)?tx.paper.customer||'—':tx.type==='incoming_writer_refund'?tx.paper.writer||'—':tx.type.startsWith('incoming')?tx.paper.customer||'—':tx.paper.writer||'—')}</td><td><span class="cash-label ${tx.type.startsWith('outgoing')?'outgoing':''}">${tx.reversalOf?'冲销 · ':''}${typeLabels[tx.type]}${tx.reversed?'（已冲销）':''}</span></td><td class="finance-amount ${tx.type.startsWith('incoming')?'incoming':'outgoing'}">${tx.type.startsWith('incoming')?'+':'−'}${yuan(transactionAmount(tx))}</td><td><div>${esc(tx.method||'—')}</div><div class="cell-sub" title="${esc(tx.note)}">${esc(tx.note.length>24?tx.note.slice(0,24)+'…':tx.note||'无备注')}</div></td><td><button class="text-btn" data-action="detail-finance" data-id="${esc(tx.paper.id)}">${icon('wallet')}详情</button></td></tr>`).join('')}</tbody></table></div>${paging}`;
@@ -745,6 +780,7 @@ document.addEventListener('input', event => {
  if(event.target.id==='search'){state.search=event.target.value;state.page=1;renderResults();}
 });
 document.addEventListener('change', event => {
+ if(event.target.id==='page-size'){setPageSize(event.target.value);return;}
  if(event.target.id==='finance-profit-basis'){state.financeProfitBasis=event.target.value==='created'?'created':'settled';state.page=1;renderFinance();return;}
  if(event.target.id==='finance-year'){state.financeYear=event.target.value||String(new Date().getFullYear());resetFilters();renderFinance();return;}
  const names={'status-filter':'status','from-filter':'from','to-filter':'to','customer-filter':'customerId'};
@@ -825,7 +861,7 @@ document.addEventListener('submit',async event=>{
   }
   else if(form.id==='password-form') {
    if(data.newPassword!==data.confirm)throw new Error('两次输入的新密码不一致');
-   const result=await request('POST','/api/password',{currentPassword:data.currentPassword,newPassword:data.newPassword});state.csrf=result.csrf;form.reset();toast('密码修改成功');
+   const result=await request('POST','/api/password',{currentPassword:data.currentPassword,newPassword:data.newPassword});if(origin.csrf!==state.csrf||!state.authenticated)return;state.csrf=result.csrf;if(form.isConnected)form.reset();toast('密码修改成功');
   }
   else if(form.id==='restore-form') {
    const file=$('#backup-file',form).files[0];if(!file)throw new Error('请选择备份文件');
