@@ -67,7 +67,7 @@ class AuthorRelationsTest(ApiTestCase):
         self.call('POST', '/api/papers', {'title': 'A客户论文', 'authors': '张三、李四'}, expected=201)
         first_client, first_csrf = self.client, self.csrf
         self.reset_client()
-        self.csrf = self.call('POST', '/api/register', {'username': 'customer-b', 'password': 'Test-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'customer-b', 'password': 'Test-password-2026'})['csrf']
         self.assertEqual([], self.call('GET', '/api/account/authors')['linkedAuthors'])
         self.call('POST', '/api/papers', {'title': 'B客户论文', 'authors': '张三、王五'}, expected=201)
         self.assertEqual({'张三', '王五'}, {a['name'] for a in self.call('GET', '/api/account/authors')['linkedAuthors']})

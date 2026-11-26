@@ -17,6 +17,7 @@ public final class Vault implements ApplicationStore {
     private byte[] salt;
     private SecretKey key;
     private Map<String, Object> state;
+    private DatabaseCrypto recoveryCrypto;
     public Vault(Path directory) { this.file = directory.resolve("papers.vault"); }
     public synchronized boolean exists() { return Files.exists(file); }
     public synchronized void setup(String username, String password) throws Exception {
@@ -83,8 +84,56 @@ public final class Vault implements ApplicationStore {
         if (current.length() > 128) throw new ApiException(401, "当前密码不正确");
         try { decode(Files.readAllBytes(file), derive(current, salt)); }
         catch (GeneralSecurityException e) { throw new ApiException(401, "当前密码不正确"); }
-        byte[] newSalt = random(16); SecretKey newKey = derive(next, newSalt);
-        persist(state, newKey, newSalt); key = newKey; salt = newSalt;
+        replacePassword(next);
+    }
+    Path recoveryFile() { return file.resolveSibling("account-recovery.json"); }
+    synchronized void configureRecovery(DatabaseCrypto crypto) { recoveryCrypto=crypto; }
+    synchronized String recoveryEmail(String username) throws Exception {
+        if(!Files.exists(recoveryFile()))return "";
+        return Main.string(recoveryRecord(username),"email");
+    }
+    synchronized void bindRecoveryEmail(String email) throws Exception {
+        if(state==null)throw new ApiException(401,"请先登录");
+        writeRecovery(username(),email,List.of(Base64.getEncoder().encodeToString(key.getEncoded())));
+    }
+    synchronized void resetPassword(String username,String next) throws Exception {
+        validatePassword(next);
+        Map<String,Object> record=recoveryRecord(username);
+        byte[] encoded=Files.readAllBytes(file);Map<String,Object> loaded=null;SecretKey recovered=null;
+        for(Object item:Json.array(record.get("keys"))) {
+            byte[] raw=Base64.getDecoder().decode(item.toString());
+            if(raw.length!=32)throw new GeneralSecurityException("Invalid recovery key");
+            SecretKey candidate=new SecretKeySpec(raw,"AES");
+            try { loaded=decode(encoded,candidate);recovered=candidate;break; } catch(GeneralSecurityException ignored) { }
+        }
+        if(loaded==null||!username.equals(Main.string(loaded,"username")))throw new ApiException(400,"无法恢复此账号，请检查账号恢复文件是否完整");
+        BusinessService.migrate(loaded);validateState(loaded);
+        state=loaded;key=recovered;salt=extractSalt(encoded);replacePassword(next);
+    }
+    private void replacePassword(String next) throws Exception {
+        byte[] newSalt=random(16);SecretKey newKey=derive(next,newSalt);
+        if(Files.exists(recoveryFile())) {
+            Map<String,Object> record=recoveryRecord(username());
+            // Save both candidates first: either vault survives a crash during atomic replacement.
+            writeRecovery(username(),Main.string(record,"email"),List.of(Base64.getEncoder().encodeToString(key.getEncoded()),Base64.getEncoder().encodeToString(newKey.getEncoded())));
+        }
+        persist(state,newKey,newSalt);key=newKey;salt=newSalt;
+    }
+    private Map<String,Object> recoveryRecord(String username) throws Exception {
+        if(recoveryCrypto==null)throw new ApiException(503,"账号恢复密钥缺失，请联系管理员恢复原密钥文件");
+        return Json.object(Json.parse(recoveryCrypto.decrypt("password-recovery:"+username,Files.readString(recoveryFile(),StandardCharsets.UTF_8))));
+    }
+    private void writeRecovery(String username,String email,List<String> keys) throws Exception {
+        if(recoveryCrypto==null)throw new IllegalStateException("Recovery encryption is not configured");
+        byte[] encoded=recoveryCrypto.encrypt("password-recovery:"+username,Json.write(Map.of("email",email,"keys",keys))).getBytes(StandardCharsets.UTF_8);
+        Path temporary=recoveryFile().resolveSibling("account-recovery.json.tmp");
+        try {
+            try(FileChannel channel=FileChannel.open(temporary,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING,StandardOpenOption.WRITE)) {
+                ByteBuffer buffer=ByteBuffer.wrap(encoded);while(buffer.hasRemaining())channel.write(buffer);channel.force(true);
+            }
+            try { Files.move(temporary,recoveryFile(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
+            catch(AtomicMoveNotSupportedException error) { Files.move(temporary,recoveryFile(),StandardCopyOption.REPLACE_EXISTING); }
+        } finally { Files.deleteIfExists(temporary); }
     }
     private void persist(Map<String, Object> next, SecretKey nextKey, byte[] nextSalt) throws Exception {
         byte[] bytes = encode(next, nextKey, nextSalt);

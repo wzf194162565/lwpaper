@@ -46,7 +46,7 @@ test('anonymous visits start at login and every authenticated view renders',asyn
  assert.match(nodes.get('#root').innerHTML,/登录系统/);
  assert.match(nodes.get('#root').innerHTML,/name="username"/);
  assert.match(nodes.get('#root').innerHTML,/autocomplete="username"/);
- run("state.authMode='register';renderAuth()");assert.match(nodes.get('#root').innerHTML,/注册并创建工作台/);
+ run("state.authMode='register';renderAuth()");assert.match(nodes.get('#root').innerHTML,/完成注册/);
  run("state.initialized=true;state.authMode='login';renderAuth();");
  assert.match(nodes.get('#root').innerHTML,/name="username"/);
  assert.match(nodes.get('#root').innerHTML,/账号与密码/);
@@ -1209,7 +1209,7 @@ test('home exposes only login and registration without confusing registration wi
  assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="register"/);
  for(const name of ['username','password','confirm'])assert.ok(nodes.get('#root').innerHTML.includes(`name="${name}"`));
  assert.ok(!nodes.get('#root').innerHTML.includes('当前工作台已注册'));
- assert.match(nodes.get('#root').innerHTML,/独立工作台/);
+ assert.match(nodes.get('#root').innerHTML,/获取验证码后完成注册/);
  await clickAction(handlers,{action:'auth-mode',mode:'login'});
  assert.match(nodes.get('#root').innerHTML,/value="&lt;script&gt;"/);
  run('renderShell()');assert.match(nodes.get('#root').innerHTML,/data-action="change-password"/);
@@ -1448,15 +1448,17 @@ test('home password visibility toggles each field independently while preserving
  assert.equal(run('visibilityRequests'),0);
 });
 
-test('home registration and login submit their own endpoint and enter the workspace',async()=>{
+test('login enters the workspace while verified registration returns to the login page',async()=>{
  for(const mode of ['login','register']) {
   const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
   run(`globalThis.calls=[];api=async(url,options={})=>{calls.push({url,...options});return options.method?{csrf:'new-token',username:'test-user'}:[];};`);
-  formValues(run,{username:'test-user',password:'Test-password-2026',confirm:'Test-password-2026'});
+  formValues(run,{username:'test-user',email:'test-user@qq.com',code:'123456',password:'Test-password-2026',confirm:'Test-password-2026'});
   const {event,error}=formEvent('auth-form',mode);
   await Promise.all(handlers.get('submit').map(fn=>fn(event)));
   assert.equal(error.textContent,'');assert.equal(run('calls[0].url'),`/api/${mode}`);
-  assert.equal(run('state.authenticated'),true);assert.equal(run('state.csrf'),'new-token');
+  assert.equal(run('state.authenticated'),mode==='login');assert.equal(run('state.csrf'),mode==='login'?'new-token':'');
+  assert.equal(run('state.authMode'),'login');
+  if(mode==='register')assert.equal(run('calls.length'),1);
   assert.equal(run('state.view'),'records');assert.equal(run('state.authSubmitting'),false);
  }
 });
@@ -1464,16 +1466,17 @@ test('home registration and login submit their own endpoint and enter the worksp
 test('duplicate account errors retain the registration form so a different account can be submitted',async()=>{
  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
  run("state.initialized=true;state.authMode='register';renderAuth();api=async()=>{throw new Error('该账号已被注册，请更换账号或直接登录');}");
- formValues(run,{username:'existing-user',password:'Test-password-2026',confirm:'Test-password-2026'});
+ formValues(run,{username:'existing-user',email:'existing-user@qq.com',code:'123456',password:'Test-password-2026',confirm:'Test-password-2026'});
  const {event,error,submit}=formEvent('auth-form','register');
  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
  assert.match(error.textContent,/该账号已被注册/);assert.equal(submit.disabled,false);
  assert.match(nodes.get('#root').innerHTML,/id="auth-form"[^>]*data-mode="register"/);
  assert.equal(run('state.authenticated'),false);
  run("globalThis.registered=[];api=async(url,options={})=>{if(options.method){registered.push(JSON.parse(options.body));return {csrf:'second-token',username:'new-user'};}return [];};");
- formValues(run,{username:'new-user',password:'Test-password-2026',confirm:'Test-password-2026'});
+ formValues(run,{username:'new-user',email:'new-user@qq.com',code:'123456',password:'Test-password-2026',confirm:'Test-password-2026'});
  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
- assert.equal(error.textContent,'');assert.equal(run('state.username'),'new-user');assert.equal(run('state.authenticated'),true);
+ assert.equal(error.textContent,'');assert.equal(run('state.username'),'new-user');assert.equal(run('state.authenticated'),false);
+ assert.equal(run('state.authMode'),'login');assert.match(nodes.get('#root').innerHTML,/登录系统/);
 });
 
 test('removed home password mode falls back to login and cannot submit password changes',async()=>{
@@ -1490,6 +1493,149 @@ test('removed home password mode falls back to login and cannot submit password 
  assert.equal(run('messages.length'),0);
  assert.match(nodes.get('#root').innerHTML,/登录系统/);
  assert.ok(!nodes.get('#root').innerHTML.includes('Changed-password'));
+});
+
+test('login credential errors reveal email recovery while other failures do not',async()=>{
+ for(const status of [500,401]) {
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+  const entry={innerHTML:''};nodes.set('#auth-recovery-entry',entry);
+  run(`state.authMode='login';api=async()=>{const error=new Error('账号或密码不正确');error.status=${status};throw error;};`);
+  formValues(run,{username:'recover-user',password:'Wrong-password'});
+  const {event,error,submit}=formEvent('auth-form','login');
+  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+  assert.match(error.textContent,/账号或密码不正确/);assert.equal(submit.disabled,false);
+  assert.equal(entry.innerHTML.includes('忘记密码'),status===401);
+  if(status===401) {
+   await clickAction(handlers,{action:'forgot-password'});
+   const html=nodes.get('#root').innerHTML;
+   assert.match(html,/data-mode="forgot"/);assert.match(html,/注册时绑定的邮箱/);
+   for(const name of ['username','email','code','newPassword','confirm'])assert.ok(html.includes(`name="${name}"`));
+   assert.doesNotMatch(html,/name="currentPassword"/);
+   assert.match(html,/data-action="send-reset-code"/);assert.match(html,/返回登录/);
+  }
+ }
+});
+
+test('registration requires QQ email and code then clears credentials and returns to login',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("state.authMode='register';renderAuth();globalThis.calls=[];globalThis.notices=[];toast=message=>notices.push(message);api=async(url,options={})=>{calls.push({url,...options});return {ok:true,username:'recover-user'};};");
+ assert.match(nodes.get('#root').innerHTML,/name="email" type="email" required/);
+ assert.match(nodes.get('#root').innerHTML,/注册请使用本人常用的 QQ 邮箱/);
+ assert.match(nodes.get('#root').innerHTML,/请输入你的 QQ 邮箱，如 123456@qq.com/);
+ assert.match(nodes.get('#root').innerHTML,/title="注册请使用 QQ 邮箱（以 @qq.com 结尾）"/);
+ assert.match(nodes.get('#root').innerHTML,/name="code"[^>]*required/);
+ assert.match(nodes.get('#root').innerHTML,/data-action="send-register-code"/);
+ formValues(run,{username:'recover-user',email:'owner@qq.com',code:'123456',password:'Original-password',confirm:'Original-password'});
+ const {event}=formEvent('auth-form','register');await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+ const body=JSON.parse(run('calls[0].body'));assert.equal(body.email,'owner@qq.com');assert.equal(body.code,'123456');
+ assert.equal(run('calls.length'),1);assert.equal(run('state.authenticated'),false);assert.equal(run('state.csrf'),'');
+ assert.equal(run('state.authMode'),'login');assert.equal(run('state.username'),'recover-user');
+ assert.match(run('notices.at(-1)'),/注册成功，请使用账号和密码登录/);
+ assert.doesNotMatch(nodes.get('#root').innerHTML,/Original-password|123456|name="code"/);
+});
+
+test('registration sends a dedicated code and enforces its own resend cooldown',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));
+ const form={isConnected:true,querySelector:()=>null},button={disabled:false,textContent:''},status={textContent:''};
+ nodes.set('#auth-form',form);nodes.set('[data-action="send-register-code"]',button);nodes.set('#reset-code-status',status);
+ nodes.set('#auth-username',{value:'register-user',reportValidity:()=>true});nodes.set('#auth-email',{value:'owner@qq.com',reportValidity:()=>true});
+ run("state.resetResendAt=Date.now()+60000;globalThis.sent=[];api=async(url,options)=>{sent.push({url,...options});return {message:'注册验证码已发送',retryAfter:60};};");
+ await run('sendRegistrationCode()');assert.equal(run('sent[0].url'),'/api/register/code');
+ assert.deepEqual(JSON.parse(run('sent[0].body')),{username:'register-user',email:'owner@qq.com'});
+ assert.equal(button.disabled,true);assert.match(button.textContent,/秒后重发/);assert.equal(status.textContent,'注册验证码已发送');
+ await run('sendRegistrationCode()');assert.equal(run('sent.length'),1);
+});
+
+test('registration rejects missing and malformed codes before submitting and retains failed forms',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("state.authMode='register';renderAuth();globalThis.calls=[];api=async(url,options)=>{calls.push({url,...options});throw new Error('验证码不正确或已失效');};");
+ const {event,error,submit}=formEvent('auth-form','register');
+ for(const code of ['', '12345', 'abcdef']) {
+  formValues(run,{username:'register-user',email:'owner@qq.com',code,password:'Original-password',confirm:'Original-password'});
+  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+  assert.match(error.textContent,/6 位注册验证码/);assert.equal(run('calls.length'),0);assert.equal(submit.disabled,false);
+ }
+ formValues(run,{username:'register-user',email:'owner@qq.com',code:'123456',password:'Original-password',confirm:'Original-password'});
+ await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+ assert.match(error.textContent,/验证码不正确或已失效/);assert.equal(run('state.authMode'),'register');
+ assert.equal(run('formValues.code'),'123456');assert.match(nodes.get('#root').innerHTML,/完成注册/);
+});
+
+test('registration rejects other email domains without submitting or losing entered values',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("state.authMode='register';renderAuth();globalThis.calls=[];api=async(...args)=>{calls.push(args);return {};};");
+ const {event,error,submit}=formEvent('auth-form','register');
+ for(const email of ['owner@163.com','owner@126.com','owner@foxmail.com','owner@qq.com.example','qq.com@163.com']) {
+  formValues(run,{username:'new-user',email,password:'Original-password',confirm:'Original-password'});
+  await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+  assert.match(error.textContent,/注册请使用 QQ 邮箱/);assert.equal(run('calls.length'),0);
+  assert.equal(submit.disabled,false);assert.equal(run('formValues.email'),email);
+  assert.match(nodes.get('#root').innerHTML,/data-mode="register"/);
+ }
+});
+
+test('invalid QQ registration emails get an email-specific inline error',async()=>{
+ const {run}=app();await new Promise(resolve=>setImmediate(resolve));
+ const fixture=validationForm(run,'auth-form',[
+  {name:'username',label:'登录账号',required:true,value:'new-user'},
+  {name:'email',label:'QQ 邮箱',required:true,type:'email',value:'owner@163.com',flags:{patternMismatch:true}},
+  {name:'password',label:'管理密码',required:true,type:'password',value:'Original-password'},
+  {name:'confirm',label:'确认密码',required:true,type:'password',value:'Original-password'},
+ ],'register');
+ assert.equal(run('validateForm')(fixture.form),false);
+ assert.match(fixture.controls.email.inlineError.textContent,/注册请使用 QQ 邮箱/);
+});
+
+test('password recovery sends email code with cooldown and retains values on delivery failure',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));
+ const form={isConnected:true,querySelector:()=>null},button={disabled:false,textContent:''},status={textContent:''};
+ nodes.set('#auth-form',form);nodes.set('[data-action="send-reset-code"]',button);nodes.set('#reset-code-status',status);
+ nodes.set('#auth-username',{value:'recover-user',reportValidity:()=>true});nodes.set('#auth-email',{value:'owner@example.test',reportValidity:()=>true});
+ run("globalThis.sent=[];globalThis.formErrors=[];showFormError=(form,message)=>formErrors.push(message);api=async(url,options)=>{sent.push({url,...options});return {message:'请查收邮箱',retryAfter:60};};");
+ await run('sendResetCode()');assert.equal(run('sent.length'),1);assert.equal(run('sent[0].url'),'/api/password-reset/code');
+ assert.equal(JSON.parse(run('sent[0].body')).email,'owner@example.test');assert.equal(button.disabled,true);assert.match(button.textContent,/秒后重发/);assert.equal(status.textContent,'请查收邮箱');
+ await run('sendResetCode()');assert.equal(run('sent.length'),1);
+ run("state.resetResendAt=0;api=async()=>{throw new Error('邮件发送失败');};");
+ await run('sendResetCode()');assert.equal(button.disabled,false);assert.equal(run('formErrors.at(-1)'),'邮件发送失败');
+ assert.equal(nodes.get('#auth-email').value,'owner@example.test');assert.equal(run('state.resetSending'),false);
+});
+
+test('password recovery validates confirmation then returns to login without auto sign-in',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("state.authMode='forgot';renderAuth();globalThis.calls=[];globalThis.notices=[];toast=message=>notices.push(message);api=async(url,options)=>{calls.push({url,...options});return {ok:true};};");
+ formValues(run,{username:'recover-user',email:'owner@example.test',code:'123456',newPassword:'Recovered-password',confirm:'Mismatch-password'});
+ const {event,error,submit}=formEvent('auth-form','forgot');
+ await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+ assert.match(error.textContent,/两次输入的新密码不一致/);assert.equal(run('calls.length'),0);
+ formValues(run,{username:'recover-user',email:'owner@example.test',code:'123456',newPassword:'Recovered-password',confirm:'Recovered-password'});
+ run("api=async()=>{throw new Error('验证码不正确或已失效');};");
+ await Promise.all(handlers.get('submit').map(fn=>fn(event)));assert.match(error.textContent,/验证码/);assert.equal(run('state.authMode'),'forgot');assert.equal(submit.disabled,false);
+ run("api=async(url,options)=>{calls.push({url,...options});return {ok:true};};");
+ await Promise.all(handlers.get('submit').map(fn=>fn(event)));
+ assert.equal(run('calls[0].url'),'/api/password-reset');assert.equal(JSON.parse(run('calls[0].body')).code,'123456');
+ assert.equal(run('state.authenticated'),false);assert.equal(run('state.authMode'),'login');assert.equal(run('state.csrf'),'');
+ assert.match(nodes.get('#root').innerHTML,/登录系统/);assert.doesNotMatch(nodes.get('#root').innerHTML,/Recovered-password|123456/);assert.match(run('notices.at(-1)'),/密码已重置/);
+});
+
+test('account settings group read-only username and bound email with password management',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("state.authenticated=true;state.username='registered-user';state.recoveryEmail='owner@qq.com';state.view='settings';renderShell();");
+ const html=nodes.get('#content').innerHTML;
+ assert.match(html,/账号信息/);assert.match(html,/<dt>登录账号<\/dt><dd>registered-user<\/dd>/);
+ assert.match(html,/<dt>绑定邮箱<\/dt><dd>owner@qq.com<\/dd>/);assert.match(html,/id="password-form"/);
+ assert.doesNotMatch(html,/recovery-email-form|更新绑定邮箱|找回密码邮箱|name="email"/);
+ run("state.recoveryEmail='<script>test</script>';renderSettings();");
+ assert.match(nodes.get('#content').innerHTML,/&lt;script&gt;test&lt;\/script&gt;/);
+ run("state.recoveryEmail='';renderSettings();");assert.match(nodes.get('#content').innerHTML,/未绑定邮箱/);
+});
+
+test('missing recovery endpoints explain an outdated service while other missing resources keep their errors',async()=>{
+ const {run}=app();await new Promise(resolve=>setImmediate(resolve));
+ run("fetch=async()=>({ok:false,status:404,json:async()=>({error:'请求的内容不存在'})});");
+ for(const path of ['/api/password-reset/code','/api/password-reset']) {
+  await assert.rejects(run(`request('POST',${JSON.stringify(path)},{})`),/重新启动服务并刷新页面/);
+ }
+ await assert.rejects(run("api('/api/papers/missing')"),/请求的内容不存在/);
 });
 
 test('incorrect current password in settings keeps the active session and the form visible',async()=>{

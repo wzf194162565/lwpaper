@@ -133,6 +133,6 @@ class PublicationFeesTest(ApiTestCase):
         self.process.terminate();self.process.wait(timeout=10);self.reset_client();self.start_server()
         self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
         self.assertEqual(paper,self.call('GET',path))
-        self.csrf=self.call('POST','/api/register',{'username':'other-account','password':'Other-password-2026'})['csrf']
+        self.csrf=self.register_account({'username':'other-account','password':'Other-password-2026'})['csrf']
         self.call('PUT',path+'/publication-fee',{'version':paper['version'],'publicationFeeMode':'free'},expected=404)
         self.assertEqual([],self.call('GET','/api/papers'))

@@ -24,7 +24,7 @@ function followUpLabel(p) {
  return p.followUpAt<today()?'已逾期 · '+dateLabel(p.followUpAt):p.followUpAt===today()?'今天跟进':dateLabel(p.followUpAt)+' 跟进';
 }
 const sum = (list, key) => list.reduce((n, p) => n + (p[key] || 0), 0);
-const state = {storage:'file',csrf:'',username:'',initialized:false,authenticated:false,authMode:'',authSubmitting:false,papers:[],customers:[],customerId:'',view:'records',tab:'all',search:'',status:'',from:'',to:'',financeType:'balances',financeYear:String(new Date().getFullYear()),financeProfitBasis:'settled',page:1,pageSize:8,drawer:null,modal:null,loading:false};
+const state = {storage:'file',csrf:'',username:'',initialized:false,authenticated:false,authMode:'',authSubmitting:false,loginFailed:false,authEmail:'',recoveryEmail:'',resetSending:false,resetResendAt:0,registrationResendAt:0,papers:[],customers:[],customerId:'',view:'records',tab:'all',search:'',status:'',from:'',to:'',financeType:'balances',financeYear:String(new Date().getFullYear()),financeProfitBasis:'settled',page:1,pageSize:8,drawer:null,modal:null,loading:false};
 let credentialTimer;
 let previousFocus;
 let overlayRevision=0,drawerRequestSequence=0,dataLoadSequence=0;
@@ -86,7 +86,9 @@ async function api(path, options={}) {
  const result = await response.json();
  if (!response.ok) {
   if (response.status === 401 && csrf===state.csrf && state.authenticated && result.authenticated!==true) { state.authenticated = false; state.authMode='login';state.csrf='';state.papers=[];state.customers=[]; closeOverlay(); renderAuth(); }
-  throw new Error(result.error || '请求失败，请重试');
+  const recoveryUnavailable=response.status===404&&['/api/password-reset/code','/api/password-reset'].includes(path);
+  const registrationUnavailable=response.status===404&&path==='/api/register/code';
+  const error=new Error(registrationUnavailable?'当前服务尚未加载注册验证码功能，请重新启动服务并刷新页面后重试。':recoveryUnavailable?'当前服务尚未加载邮箱找回功能，请重新启动服务并刷新页面后重试。':result.error || '请求失败，请重试');error.status=response.status;error.code=result.code;throw error;
  }
  return result;
 }
@@ -127,21 +129,64 @@ async function finishSave(saved,message,{customer=false,view=state.view,financeT
 }
 
 function brand() { return `<div class="brand"><div class="brand-mark">${icon('document')}</div><div><div class="brand-name">知序</div><div class="brand-en">PAPER DESK</div></div></div>`; }
+function showForgotPassword() {
+ state.loginFailed=true;
+ const entry=$('#auth-recovery-entry');
+ if(entry)entry.innerHTML='<button type="button" class="text-btn auth-forgot" data-action="forgot-password">忘记密码？通过邮箱找回</button>';
+}
+let recoveryTimer;
+function updateRecoveryCooldown() {
+ clearTimeout(recoveryTimer);
+ const registrationButton=$('[data-action="send-register-code"]'),button=registrationButton||$('[data-action="send-reset-code"]');if(!button)return;
+ const seconds=Math.max(0,Math.ceil(((registrationButton?state.registrationResendAt:state.resetResendAt)-Date.now())/1000));
+ button.disabled=state.resetSending||seconds>0;
+ button.textContent=state.resetSending?'发送中…':seconds?`${seconds} 秒后重发`:'获取验证码';
+ if(seconds)recoveryTimer=setTimeout(updateRecoveryCooldown,1000);
+}
+async function sendAuthCode(registration=false) {
+ const form=$('#auth-form'),username=$('#auth-username'),email=$('#auth-email');
+ const cooldown=registration?'registrationResendAt':'resetResendAt';
+ if(state.authSubmitting||state.resetSending||Date.now()<state[cooldown])return;
+ if(!username.reportValidity()||!email.reportValidity())return;
+ state.resetSending=true;updateRecoveryCooldown();
+ const error=$('#auth-error');if(error)error.textContent='';
+ try {
+  const result=await request('POST',registration?'/api/register/code':'/api/password-reset/code',{username:username.value.trim(),email:email.value.trim()});
+  state[cooldown]=Date.now()+(result.retryAfter||60)*1000;
+  if(form.isConnected){const status=$('#reset-code-status');if(status)status.textContent=result.message;}
+ } catch(error) { if(form.isConnected)showFormError(form,error.message); }
+ finally { state.resetSending=false;updateRecoveryCooldown(); }
+}
+const sendResetCode=()=>sendAuthCode();
+const sendRegistrationCode=()=>sendAuthCode(true);
+function passwordVisibilityButton(id,label,action='toggle-password') {
+ return `<button type="button" class="auth-password-toggle" data-action="${action}" data-target="${id}" data-label="${label}" aria-controls="${id}" aria-label="显示${label}" aria-pressed="false" title="显示${label}">${icon('eye')}</button>`;
+}
 function renderAuth() {
- const mode = state.authMode==='register' ? 'register' : 'login';
- const setup = mode==='register';
- const title = setup ? '注册账号' : '登录系统';
- const subtitle = setup ? '填写账号和密码，创建你的独立工作台。' : '输入账号与密码，继续处理你的投稿记录。';
- const passwordNote = state.storage==='mysql' ? '管理密码用于登录和加密备份，投稿密码使用独立密钥加密。请妥善保管管理密码、加密密钥和备份。系统没有预设账号或默认密码。' : '管理密码同时用于加密本地数据，请妥善保管。忘记密码将无法恢复数据，系统没有预设账号或默认密码。';
- const passwordField = (name,label,fresh=false) => `<div class="field"><label for="auth-${name}">${label}</label><div class="auth-password-input"><input id="auth-${name}" name="${name}" type="password" required minlength="${fresh?10:1}" maxlength="128" autocomplete="${fresh?'new-password':'current-password'}" placeholder="${fresh?'10–128 个字符':'请输入管理密码'}"><button type="button" class="auth-password-toggle" data-action="toggle-auth-password" data-target="auth-${name}" data-label="${label}" aria-controls="auth-${name}" aria-label="显示${label}" aria-pressed="false" title="显示${label}">${icon('eye')}</button></div></div>`;
- const form = `<form id="auth-form" novalidate data-mode="${mode}">
+ clearTimeout(recoveryTimer);
+ const mode=['register','forgot'].includes(state.authMode)?state.authMode:'login';
+ const setup=mode==='register',recovering=mode==='forgot';
+ const title=recovering?'找回密码':setup?'注册账号':'登录系统';
+ const subtitle=recovering?'使用注册时绑定的邮箱接收验证码，设置新的登录密码。':setup?'填写账号和 QQ 邮箱，获取验证码后完成注册。注册成功后请登录。':'输入账号与密码，继续处理你的投稿记录。';
+ const passwordField=(name,label,fresh=false)=>`<div class="field"><label for="auth-${name}">${label}</label><div class="auth-password-input"><input id="auth-${name}" name="${name}" type="password" required minlength="${fresh?10:1}" maxlength="128" autocomplete="${fresh?'new-password':'current-password'}" placeholder="${fresh?'10–128 个字符':'请输入管理密码'}">${passwordVisibilityButton(`auth-${name}`,label,'toggle-auth-password')}</div></div>`;
+ const form=`<form id="auth-form" novalidate data-mode="${mode}">
   <div class="field"><label for="auth-username">登录账号</label><input id="auth-username" name="username" type="text" required minlength="3" maxlength="64" ${setup?'pattern="[A-Za-z0-9][A-Za-z0-9_.@+\\-]{2,63}" title="3–64 个字符，以字母或数字开头，支持字母、数字、下划线、点、@、加号和减号"':''} autocomplete="username" placeholder="请输入登录账号" value="${esc(state.username)}" autofocus>${setup?'<small>3–64 个字符，以字母或数字开头，支持 _ . @ + -</small>':''}</div>
-  ${passwordField('password',setup?'设置管理密码':'管理密码',setup)}
-  ${setup ? passwordField('confirm','确认密码',true) : ''}
-  ${setup?'<small>每个账号拥有独立的客户、论文与收支记录。账号名是否可用将在提交后校验。</small>':''}<div class="error-message" id="auth-error" role="alert"></div><button class="btn primary" type="submit">${setup?'注册并创建工作台':'登录工作台'}${icon('chevron')}</button>
+  ${setup||recovering?`<div class="field"><label for="auth-email">${recovering?'绑定邮箱':'QQ 邮箱'}</label><input id="auth-email" name="email" type="email" required maxlength="254" autocomplete="email" value="${esc(state.authEmail)}" placeholder="${recovering?'请输入注册时绑定的邮箱':'请输入你的 QQ 邮箱，如 123456@qq.com'}" ${setup?'pattern="[^@]+@[Qq][Qq][.][Cc][Oo][Mm]" title="注册请使用 QQ 邮箱（以 @qq.com 结尾）" aria-describedby="register-email-hint"':''}>${setup?'<small id="register-email-hint">注册请使用本人常用的 QQ 邮箱（以 @qq.com 结尾），用于接收找回密码验证码。</small>':''}</div>`:''}
+  ${setup||recovering?`<div class="field"><label for="auth-code">邮箱验证码</label><div class="auth-code-row"><input id="auth-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="6 位验证码"><button type="button" class="btn" data-action="${setup?'send-register-code':'send-reset-code'}">获取验证码</button></div><small id="reset-code-status" role="status" aria-live="polite">验证码 10 分钟内有效。</small></div>`:''}
+  ${passwordField(recovering?'newPassword':'password',recovering?'新密码':setup?'设置管理密码':'管理密码',setup||recovering)}
+  ${setup||recovering?passwordField('confirm',recovering?'确认新密码':'确认密码',true):''}
+  ${setup?'<small>每个账号拥有独立的客户、论文与收支记录。</small>':''}
+  <div class="error-message" id="auth-error" role="alert"></div>
+  ${mode==='login'?'<div id="auth-recovery-entry"></div>':''}
+  <button class="btn primary" type="submit">${recovering?'重置密码':setup?'完成注册':'登录工作台'}${icon('chevron')}</button>
+  ${recovering?'<button type="button" class="text-btn auth-back" data-action="auth-mode" data-mode="login">返回登录</button>':''}
  </form>`;
- $('#root').innerHTML = `<div class="auth-layout"><aside class="auth-brand-panel">${brand()}<div class="auth-intro"><div class="eyebrow">A CLEARER WAY TO MANAGE</div><h1>每一次投稿，<br>都井然有序。</h1><p>从论文档案到投稿进度，从定金到尾款，<br>让每一笔记录、每一个节点，都清晰可循。</p><div class="auth-art" aria-hidden="true"><div class="art-head"><span class="art-dot"></span>我的投稿工作台</div><div class="art-row"></div><div class="art-row"></div><div class="art-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="auth-bottom">${icon('shield')}${state.storage==='mysql'?'数据库保存 · 投稿密码加密 · 专注管理':'本地保存 · 加密保护 · 专注管理'}</div></aside><main class="auth-form-panel"><div class="auth-form-wrap"><div class="eyebrow">YOUR PERSONAL WORKSPACE</div><nav class="auth-nav" aria-label="账号功能">${[['login','登录'],['register','注册']].map(([id,label])=>`<button type="button" class="tab ${mode===id?'active':''}" data-action="auth-mode" data-mode="${id}" ${mode===id?'aria-current="page"':''}>${label}</button>`).join('')}</nav><h2>${title}</h2><p class="subtitle">${subtitle}</p>${form}<div class="auth-note">${icon('lock')}<span>${setup?passwordNote:'登录有效期为 8 小时，离开时可点击左下角退出，锁定访问。'}</span></div></div></main></div>`;
- prepareForms($('#root'));
+ $('#root').innerHTML=`<div class="auth-layout"><aside class="auth-brand-panel">${brand()}<div class="auth-intro"><div class="eyebrow">A CLEARER WAY TO MANAGE</div><h1>每一次投稿，<br>都井然有序。</h1><p>从论文档案到投稿进度，从定金到尾款，<br>让每一笔记录、每一个节点，都清晰可循。</p><div class="auth-art" aria-hidden="true"><div class="art-head"><span class="art-dot"></span>我的投稿工作台</div><div class="art-row"></div><div class="art-row"></div><div class="art-bars"><span></span><span></span><span></span><span></span><span></span></div></div></div><div class="auth-bottom">${icon('shield')}${state.storage==='mysql'?'数据库保存 · 投稿密码加密 · 专注管理':'本地保存 · 加密保护 · 专注管理'}</div></aside><main class="auth-form-panel"><div class="auth-form-wrap"><div class="eyebrow">YOUR PERSONAL WORKSPACE</div><nav class="auth-nav" aria-label="账号功能">${[['login','登录'],['register','注册']].map(([id,label])=>`<button type="button" class="tab ${mode===id?'active':''}" data-action="auth-mode" data-mode="${id}" ${mode===id?'aria-current="page"':''}>${label}</button>`).join('')}</nav><h2>${title}</h2><p class="subtitle">${subtitle}</p>${form}<div class="auth-note">${icon('lock')}<span>${recovering?'重置成功后请重新登录。验证码将发送至注册时验证的邮箱。':setup?'请妥善保管密码和绑定邮箱。旧备份仍需使用备份时的密码解锁。':'登录有效期为 8 小时，离开时可点击左下角退出，锁定访问。'}</span></div></div></main></div>`;
+ prepareForms($('#root'));if(mode==='login'&&state.loginFailed)showForgotPassword();if(setup||recovering)updateRecoveryCooldown();
+}
+
+function accountSettings() {
+ return `<section class="panel settings-card"><h2>${icon('users')}账号信息</h2><dl class="account-info"><div><dt>登录账号</dt><dd>${esc(state.username)}</dd></div><div><dt>绑定邮箱</dt><dd>${esc(state.recoveryEmail||'未绑定邮箱')}</dd></div></dl><h3 class="section-heading">${icon('lock')}修改管理密码</h3><p>${state.storage==='mysql'?'新密码用于登录和加密之后下载的备份，投稿密码继续使用独立密钥加密。':'新密码会重新加密本机数据。'}更新密码会使此账号在其他页面的登录失效。旧备份仍需使用备份时的密码解锁。</p><form id="password-form" novalidate><div class="field"><label for="current-password">当前密码<span class="required-mark">必填</span></label><div class="auth-password-input"><input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required maxlength="128">${passwordVisibilityButton('current-password','当前密码')}</div></div><div class="field"><label for="new-password">新密码<span class="required-mark">必填</span></label><div class="auth-password-input"><input id="new-password" name="newPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="至少 10 个字符">${passwordVisibilityButton('new-password','新密码')}</div></div><div class="field"><label for="confirm-password">确认新密码<span class="required-mark">必填</span></label><div class="auth-password-input"><input id="confirm-password" name="confirm" type="password" autocomplete="new-password" required minlength="10" maxlength="128">${passwordVisibilityButton('confirm-password','确认新密码')}</div></div><div class="error-message" role="alert"></div><button type="submit" class="btn primary">${icon('lock')}更新密码</button></form></section>`;
 }
 
 function renderShell() {
@@ -340,7 +385,7 @@ function renderFinanceResults() {
 }
 
 function renderSettings() {
- $('#content').innerHTML = `${pageHeading('数据与设置','妥善备份记录，安心管理你的工作台。')}<div class="settings-grid"><section class="panel settings-card"><h2>${icon('shield')}数据备份与恢复</h2><p>加密备份包含论文档案、投稿账号密码、全部收支和投稿历史。建议定期下载，并妥善保存备份时使用的管理密码。</p><div class="actions">${btn('backup','下载加密备份','down','primary')}${btn('restore','从备份恢复','upload')}</div><div class="notice">${icon('info')}<span>恢复会替换当前账号的全部记录，请先下载当前备份。恢复后仍使用当前账号与管理密码登录。</span></div><div class="settings-meta"><span>当前论文</span><strong>${state.papers.length} 篇</strong></div><div class="settings-meta"><span>收支流水</span><strong>${allTransactions().length} 笔</strong></div><div class="settings-meta"><span>数据保护</span><strong>${state.storage==='mysql'?'投稿密码与备份加密':'AES-256-GCM 加密'}</strong></div><div class="settings-meta"><span>数据存储</span><strong>${state.storage==='mysql'?'MySQL 数据库':'本机加密文件'}</strong></div></section><section class="panel settings-card"><h2>${icon('lock')}修改管理密码</h2><p>${state.storage==='mysql'?'新密码用于登录和加密之后下载的备份，投稿密码继续使用独立密钥加密。':'新密码会重新加密本机数据。'}更新密码会使此账号在其他页面的登录失效。旧备份仍需使用备份时的密码解锁。</p><form id="password-form" novalidate><div class="field"><label for="current-password">当前密码<span class="required-mark">必填</span></label><input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required maxlength="128"></div><div class="field"><label for="new-password">新密码<span class="required-mark">必填</span></label><input id="new-password" name="newPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="128" placeholder="至少 10 个字符"></div><div class="field"><label for="confirm-password">确认新密码<span class="required-mark">必填</span></label><input id="confirm-password" name="confirm" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></div><div class="error-message" role="alert"></div><button type="submit" class="btn primary">${icon('lock')}更新密码</button></form></section><section class="panel settings-card"><h2>${icon('info')}使用说明</h2><p>先在客户管理中建立客户档案，再到论文管理中新建全包或半包论文；全包可安排写作并约定稿酬。全包表单可同时填写稿酬约定和实际已付款，尾款与待付稿酬自动计算；后续也可通过“登记定金”“登记尾款”补录付款。收款在论文收支明细中逐笔登记。在投稿管理中分别登记每次投稿的期刊、账号与日期；改投时新增记录，旧投稿完整保留。客户档案会自动汇总其论文、发表期刊和费用。</p><p>投稿日期筛选针对当前投稿日期；收支管理的日期筛选针对收付日期。CSV 导出遵循当前筛选，且不包含投稿账号、密码、邮箱和手机号。加密备份用于完整迁移；有稿件时下载 ZIP 备份，内含加密稿件及全部历史版本。</p><p>本机版仅接受本机访问。${state.storage==='mysql'?'业务记录保存在已配置的 MySQL 数据库。迁移或维护数据库前，请同时备份数据库及独立加密密钥文件。':'数据保存在项目 data 目录。'}不会自动查询期刊网站或同步外部投稿系统。</p></section><section class="panel settings-card"><h2>${icon('document')}关于知序</h2><p>知序 · Paper Desk<br>论文投稿与收支管理工作台 · 独立账号</p><div class="notice green">${icon('shield')}<span>管理密码没有找回功能，请妥善保管密码与加密备份。离开工作台时，可点击左下角退出按钮锁定访问。</span></div></section></div>${footer()}`;
+ $('#content').innerHTML = `${pageHeading('数据与设置','妥善备份记录，安心管理你的工作台。')}<div class="settings-grid"><section class="panel settings-card"><h2>${icon('shield')}数据备份与恢复</h2><p>加密备份包含论文档案、投稿账号密码、全部收支和投稿历史。建议定期下载，并妥善保存备份时使用的管理密码。</p><div class="actions">${btn('backup','下载加密备份','down','primary')}${btn('restore','从备份恢复','upload')}</div><div class="notice">${icon('info')}<span>恢复会替换当前账号的全部记录，请先下载当前备份。恢复后仍使用当前账号与管理密码登录。</span></div><div class="settings-meta"><span>当前论文</span><strong>${state.papers.length} 篇</strong></div><div class="settings-meta"><span>收支流水</span><strong>${allTransactions().length} 笔</strong></div><div class="settings-meta"><span>数据保护</span><strong>${state.storage==='mysql'?'投稿密码与备份加密':'AES-256-GCM 加密'}</strong></div><div class="settings-meta"><span>数据存储</span><strong>${state.storage==='mysql'?'MySQL 数据库':'本机加密文件'}</strong></div></section>${accountSettings()}<section class="panel settings-card"><h2>${icon('info')}使用说明</h2><p>先在客户管理中建立客户档案，再到论文管理中新建全包或半包论文；全包可安排写作并约定稿酬。全包表单可同时填写稿酬约定和实际已付款，尾款与待付稿酬自动计算；后续也可通过“登记定金”“登记尾款”补录付款。收款在论文收支明细中逐笔登记。在投稿管理中分别登记每次投稿的期刊、账号与日期；改投时新增记录，旧投稿完整保留。客户档案会自动汇总其论文、发表期刊和费用。</p><p>投稿日期筛选针对当前投稿日期；收支管理的日期筛选针对收付日期。CSV 导出遵循当前筛选，且不包含投稿账号、密码、邮箱和手机号。加密备份用于完整迁移；有稿件时下载 ZIP 备份，内含加密稿件及全部历史版本。</p><p>本机版仅接受本机访问。${state.storage==='mysql'?'业务记录保存在已配置的 MySQL 数据库。迁移或维护数据库前，请同时备份数据库及独立加密密钥文件。':'数据保存在项目 data 目录。'}不会自动查询期刊网站或同步外部投稿系统。</p></section><section class="panel settings-card"><h2>${icon('document')}关于知序</h2><p>知序 · Paper Desk<br>论文投稿与收支管理工作台 · 独立账号</p><div class="notice green">${icon('shield')}<span>忘记管理密码时可通过绑定邮箱找回，请妥善保管邮箱与加密备份。离开工作台时，可点击左下角退出按钮锁定访问。</span></div></section></div>${footer()}`;
  prepareForms($('#content'));
 }
 
@@ -406,11 +451,12 @@ function fieldValidationMessage(control) {
  if(validity.badInput)return '请输入有效的'+label;
  if(control.required&&(control.type==='checkbox'?!control.checked:!value.trim()))return control.type==='checkbox'?'请勾选确认选项':(control.tagName==='SELECT'||control.type==='date'||control.type==='file'?'请选择':'请填写')+label;
  if(!value)return '';
+ if(control.type==='email'&&control.form?.id==='auth-form'&&control.form.dataset?.mode==='register'&&!/^[^\s@]+@qq\.com$/i.test(value.trim()))return '注册请使用 QQ 邮箱（以 @qq.com 结尾）';
  if(validity.typeMismatch)return control.type==='email'?'邮箱格式不正确，例如 name@example.com':'网址需以 http:// 或 https:// 开头';
  if(control.type==='url'&&!/^https?:\/\/[^\s]+$/i.test(value))return '网址需以 http:// 或 https:// 开头';
  if(validity.tooShort)return label+'至少填写 '+control.minLength+' 个字符';
  if(validity.tooLong)return label+'最多填写 '+control.maxLength+' 个字符';
- if(validity.patternMismatch)return '账号需为 3–64 位，以字母或数字开头，支持 _ . @ + -';
+ if(validity.patternMismatch)return control.name==='code'?'请输入 6 位数字验证码':'账号需为 3–64 位，以字母或数字开头，支持 _ . @ + -';
  if(validity.rangeUnderflow)return control.type==='date'?label+'不能早于 '+control.min:label+'不能小于 '+control.min;
  if(validity.rangeOverflow)return control.type==='date'?label+'不能晚于 '+control.max:label+'不能超过 '+control.max;
  if(validity.stepMismatch)return label+'最多保留两位小数';
@@ -457,7 +503,7 @@ function validateForm(form) {
   if(value('status')==='已发表'&&start&&published&&published<start)add('publishedAt','发表日期不能早于实际投稿日期');
   if(value('status')==='已发表'&&end&&published&&published<end)add('publishedAt','发表日期不能早于结束日期');
  }
- if(value('confirm')&&form.id==='password-form'&&value('confirm')!==value('newPassword'))add('confirm','两次输入的新密码不一致');
+ if(value('confirm')&&(form.id==='password-form'||form.dataset?.mode==='forgot')&&value('confirm')!==value('newPassword'))add('confirm','两次输入的新密码不一致');
  if(value('confirm')&&form.dataset?.mode==='register'&&value('confirm')!==value('password'))add('confirm','两次输入的密码不一致');
  if(!issues.length)return true;
  for(const issue of issues)fieldError(issue.control,issue.message);
@@ -588,13 +634,17 @@ document.addEventListener('click', async event => {
  if(fileTransferBusy){toast('文件正在传输，请等待完成。',true);return;}
  try {
   if(action==='auth-mode') {
-   if(state.authSubmitting||!['login','register'].includes(button.dataset.mode))return;
-   state.username=$('#auth-username')?.value.trim()||state.username;state.authMode=button.dataset.mode;renderAuth();$('#auth-username')?.focus();
+   if(state.authSubmitting||state.resetSending||!['login','register'].includes(button.dataset.mode))return;
+   state.username=$('#auth-username')?.value.trim()||state.username;state.authEmail=$('#auth-email')?.value.trim()||state.authEmail;state.authMode=button.dataset.mode;renderAuth();$('#auth-username')?.focus();
   }
-  else if(action==='toggle-auth-password') {
-   if(!['auth-password','auth-confirm'].includes(button.dataset.target))return;
+  else if(action==='forgot-password'){if(state.authSubmitting||state.resetSending)return;state.username=$('#auth-username')?.value.trim()||state.username;state.authMode='forgot';renderAuth();$('#auth-email')?.focus();}
+  else if(action==='send-reset-code')await sendResetCode();
+  else if(action==='send-register-code')await sendRegistrationCode();
+  else if(action==='toggle-auth-password'||action==='toggle-password') {
+   const auth=action==='toggle-auth-password';
+   if(!(auth?['auth-password','auth-newPassword','auth-confirm']:['current-password','new-password','confirm-password']).includes(button.dataset.target))return;
    const input=$('#'+button.dataset.target);
-   if(input?.form?.id!=='auth-form'||!['password','text'].includes(input.type))return;
+   if(input?.form?.id!==(auth?'auth-form':'password-form')||!['password','text'].includes(input.type))return;
    const visible=input.type==='password';input.type=visible?'text':'password';
    const label=(visible?'隐藏':'显示')+button.dataset.label;
    button.setAttribute('aria-pressed',String(visible));button.setAttribute('aria-label',label);button.title=label;
@@ -688,7 +738,7 @@ document.addEventListener('click', async event => {
  } catch(error) {
   const errorField=$('.error-message',$('#overlay-root'));
   if(errorField)errorField.textContent=error.message;else toast(error.message,true);
- } finally { if(button.isConnected)button.disabled=false; }
+ } finally { if(button.isConnected&&!['send-reset-code','send-register-code'].includes(action))button.disabled=false; }
 });
 
 document.addEventListener('input', event => {
@@ -710,11 +760,22 @@ document.addEventListener('submit',async event=>{
   if(form.id==='auth-form') {
    state.authSubmitting=true;
    const mode=form.dataset.mode;
-   if(!['login','register'].includes(mode))return;
+   if(!['login','register','forgot'].includes(mode))return;
    state.username=data.username.trim();
+   if(mode==='forgot') {
+    if(data.newPassword!==data.confirm)throw new Error('两次输入的新密码不一致');
+    await request('POST','/api/password-reset',{username:data.username,email:data.email,code:data.code,newPassword:data.newPassword});
+    state.authenticated=false;state.csrf='';state.papers=[];state.customers=[];state.authMode='login';state.loginFailed=false;state.authEmail='';state.resetResendAt=0;closeOverlay();renderAuth();toast('密码已重置，请使用新密码登录');return;
+   }
+   if(mode==='register'&&!/^[^\s@]+@qq\.com$/i.test(String(data.email||'').trim()))throw new Error('注册请使用 QQ 邮箱（以 @qq.com 结尾）');
    if(mode==='register'&&data.password!==data.confirm)throw new Error('两次输入的密码不一致');
-   const result=await request('POST',mode==='register'?'/api/register':'/api/login',{username:data.username,password:data.password});
-   state.csrf=result.csrf;state.username=result.username;state.initialized=true;state.authenticated=true;state.authMode='login';state.view='records';resetFilters();renderShell();
+   if(mode==='register') {
+    if(!/^[0-9]{6}$/.test(data.code||''))throw new Error('请输入 QQ 邮箱收到的 6 位注册验证码');
+    await request('POST','/api/register',{username:data.username,email:data.email,code:data.code,password:data.password});
+    state.authenticated=false;state.csrf='';state.papers=[];state.customers=[];state.initialized=true;state.authMode='login';state.loginFailed=false;state.authEmail='';state.registrationResendAt=0;closeOverlay();renderAuth();toast('注册成功，请使用账号和密码登录');return;
+   }
+   const result=await request('POST','/api/login',{username:data.username,password:data.password});
+   state.csrf=result.csrf;state.username=result.username;state.recoveryEmail=result.recoveryEmail||'';state.loginFailed=false;state.authEmail='';state.initialized=true;state.authenticated=true;state.authMode='login';state.view='records';resetFilters();renderShell();
    try { await loadPapers(); } catch(error) { if(state.authenticated)toast('登录成功，列表加载失败，请点击刷新。',true); }
   }
   else if(form.id==='followup-form')await saveFollowUpForm(form,data,origin);
@@ -773,7 +834,7 @@ document.addEventListener('submit',async event=>{
    const bytes=new Uint8Array(await file.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
    await request('POST','/api/restore',{backup:btoa(binary),password:data.password});closeOverlay();resetFilters();await loadPapers();toast('恢复成功');
   }
- } catch(error) { if(errorField?.isConnected)showFormError(form,error.message);else toast(error.message,true); }
+ } catch(error) { if(form.id==='auth-form'&&form.dataset.mode==='login'&&(error.status===401||error.code==='INVALID_CREDENTIALS'))showForgotPassword();if(errorField?.isConnected)showFormError(form,error.message);else toast(error.message,true); }
  finally {fileTransferBusy=false;if(form.id==='auth-form')state.authSubmitting=false;if(submit?.isConnected){submit.disabled=false;submit.innerHTML=submitLabel;}}
 });
 
@@ -800,7 +861,7 @@ window.addEventListener('beforeunload',event=>{if(isEditingDrawer()){event.preve
 
 (async()=>{
  try {
-  const session=await api('/api/session');state.customerReceiptTotalsSupported=session.customerReceiptTotalsSupported===true;state.customerReceiptsSupported=session.customerReceiptsSupported===true;state.writerPaymentsSupported=session.writerPaymentsSupported===true;state.terminationSupported=session.terminationSupported===true;state.publicationFeesSupported=session.publicationFeesSupported===true;state.storage=session.storage||'file';state.fileMaxBytes=session.fileMaxBytes||50*1024*1024;state.initialized=session.initialized;state.authenticated=session.authenticated;state.username=session.username||'';state.csrf=session.csrf;
+  const session=await api('/api/session');state.customerReceiptTotalsSupported=session.customerReceiptTotalsSupported===true;state.customerReceiptsSupported=session.customerReceiptsSupported===true;state.writerPaymentsSupported=session.writerPaymentsSupported===true;state.terminationSupported=session.terminationSupported===true;state.publicationFeesSupported=session.publicationFeesSupported===true;state.storage=session.storage||'file';state.fileMaxBytes=session.fileMaxBytes||50*1024*1024;state.initialized=session.initialized;state.authenticated=session.authenticated;state.username=session.username||'';state.recoveryEmail=session.recoveryEmail||'';state.csrf=session.csrf;
   if(session.authenticated)await loadPapers();else renderAuth();
  }catch(error){$('#root').innerHTML=`<div class="empty-state"><h3>工作台暂时无法连接</h3><p>${esc(error.message)}</p><a class="btn" href="/">重新连接</a></div>`;}
 })();

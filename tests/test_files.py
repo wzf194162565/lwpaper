@@ -123,7 +123,7 @@ class AttachmentTest(ApiTestCase):
         self.reset_client()
         self.csrf = ''
         self.download_file(paper, expected=401)
-        self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Other-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'second-user', 'password': 'Other-password-2026'})['csrf']
         self.download_file(paper, expected=404)
         self.upload(paper, expected=404)
         self.restore_archive(backup)

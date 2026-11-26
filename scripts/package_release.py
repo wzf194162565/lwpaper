@@ -13,7 +13,7 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB_FILES = ('index.html', 'app.js', 'business.js', 'files.js', 'ledger.js', 'followups.js', 'styles.css', 'favicon.svg')
-SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql', 'V004__customer_payment_deposit.sql', 'V005__paper_files.sql', 'V006__follow_up_reason.sql', 'V007__customer_classification.sql', 'V008__service_termination.sql', 'V009__publication_fees.sql', 'V010__submission_costs_and_financial_audit.sql', 'V011__author_bio.sql', 'V012__expected_publication.sql', 'V013__follow_up_tasks.sql')
+SQL_FILES = ('V001__initial_schema.sql', 'V002__customer_cooperation_date.sql', 'V003__paper_service_type.sql', 'V004__customer_payment_deposit.sql', 'V005__paper_files.sql', 'V006__follow_up_reason.sql', 'V007__customer_classification.sql', 'V008__service_termination.sql', 'V009__publication_fees.sql', 'V010__submission_costs_and_financial_audit.sql', 'V011__author_bio.sql', 'V012__expected_publication.sql', 'V013__follow_up_tasks.sql', 'V014__account_recovery_email.sql')
 
 
 def copy_file(source, target):

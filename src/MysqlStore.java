@@ -60,6 +60,9 @@ public final class MysqlStore implements ApplicationStore {
             } catch(Exception e){rollback(c);throw e;}
         }
     }
+    synchronized boolean accountExists(String account) throws Exception {
+        try(Connection c=config.connect(true)) { return !scalar(c,"SELECT id FROM lw_user WHERE username=?",account).isEmpty(); }
+    }
     public synchronized MysqlStore loginAccount(String account,String password) throws Exception {
         String space;
         try(Connection c=config.connect(true)) {
@@ -138,6 +141,30 @@ public final class MysqlStore implements ApplicationStore {
                 c.commit();backupCipher=new Vault.BackupCipher(next);
             }catch(Exception e){rollback(c);throw e;}
         }
+    }
+    synchronized String recoveryEmail(String account) throws Exception {
+        try(Connection c=config.connect(true)) {
+            return scalar(c,"SELECT u.recovery_email FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE u.username=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator'",account);
+        }
+    }
+    synchronized void bindRecoveryEmail(String email) throws Exception {
+        try(Connection c=config.connect(true)) {
+            c.setAutoCommit(false);
+            try { lock(c);requireAccount(c);execute(c,"UPDATE lw_user SET recovery_email=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",email,userId);c.commit(); }
+            catch(Exception error){rollback(c);throw error;}
+        }
+    }
+    synchronized MysqlStore resetAccountPassword(String account,String next) throws Exception {
+        Vault.validatePassword(next);
+        try(Connection c=config.connect(true)) {
+            c.setAutoCommit(false);
+            try {
+                String id=scalar(c,"SELECT u.id FROM lw_user u JOIN lw_workspace_member m ON m.user_id=u.id JOIN lw_member_role r ON r.member_id=m.id WHERE u.username=? AND u.status='enabled' AND m.status='enabled' AND r.role_code='administrator' FOR UPDATE",account);
+                if(id.isEmpty())throw new ApiException(400,"验证码不正确或已失效，请重新获取");
+                execute(c,"UPDATE lw_user SET password_hash=?,version=version+1,updated_at=UTC_TIMESTAMP(6) WHERE id=?",DatabaseCrypto.hashPassword(next),id);c.commit();
+            }catch(Exception error){rollback(c);throw error;}
+        }
+        return loginAccount(account,next);
     }
     public synchronized byte[] backup() throws Exception {
         if(backupCipher==null)throw new ApiException(401,"请先登录");
@@ -249,6 +276,7 @@ public final class MysqlStore implements ApplicationStore {
                 migrateAuthorBio(c);
                 migrateExpectedPublication(c);
                 migrateFollowUpTasks(c);
+                migrateRecoveryEmail(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
@@ -319,6 +347,16 @@ public final class MysqlStore implements ApplicationStore {
         if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V013 数据库迁移脚本校验不一致");return;}
         try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
         execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(13,?,?,UTC_TIMESTAMP(6))","独立跟进事项与处理历史",checksum);
+    }
+    private void migrateRecoveryEmail(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V014__account_recovery_email.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=14");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V014 数据库迁移脚本校验不一致");return;}
+        String column=scalar(c,"SELECT CONCAT(data_type,':',character_maximum_length,':',is_nullable,':',column_default) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_user' AND column_name='recovery_email'");
+        if(column.isEmpty())try(Statement statement=c.createStatement()){statement.execute(script);}
+        else if(!column.equals("varchar:254:NO:"))throw new IllegalStateException("账号找回邮箱字段格式不兼容");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(14,?,?,UTC_TIMESTAMP(6))","账号密码找回邮箱",checksum);
     }
 
     private void migrateExpectedPublication(Connection c) throws Exception {

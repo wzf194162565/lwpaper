@@ -8,10 +8,14 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
+import re
+
+from smtp_fixture import Inbox
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -24,6 +28,13 @@ class ApiTestCase(unittest.TestCase):
                        capture_output=True)
 
     def setUp(self):
+        self.inbox = Inbox()
+        threading.Thread(target=self.inbox.serve_forever, daemon=True).start()
+        self.addCleanup(self.inbox.server_close)
+        self.addCleanup(self.inbox.shutdown)
+        self.JAVA_OPTIONS = [*getattr(type(self), 'JAVA_OPTIONS', []), '-Dmail.host=127.0.0.1',
+                             f'-Dmail.port={self.inbox.server_address[1]}', '-Dmail.security=none',
+                             '-Dmail.from=noreply@example.test', '-Dmail.username=', '-Dmail.password=']
         directory = ROOT / '.test-data'
         directory.mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=directory)
@@ -72,6 +83,23 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(expected, response.code, content.decode(errors='replace')[:500])
         return content if raw else json.loads(content)
 
+    def register_account(self, data, expected=200):
+        """Complete email verification, then explicitly log in for business test setup."""
+        data = {'email': data.get('username', 'test-user') + '@qq.com', **data}
+        if expected != 200:
+            return self.call('POST', '/api/register', data, expected=expected)
+        code = self.registration_code(data)
+        registered = self.call('POST', '/api/register', {**data, 'code': code})
+        self.assertNotIn('csrf', registered)
+        return self.call('POST', '/api/login', {'username': data['username'], 'password': data['password']})
+
+    def registration_code(self, data):
+        self.call('POST', '/api/register/code', {'username': data['username'], 'email': data['email']})
+        message = self.inbox.messages.get(timeout=3)
+        self.assertIn('注册账号', str(message['Subject']))
+        self.assertEqual(data['email'].strip().lower(), message['To'])
+        return re.search(r'\b[0-9]{6}\b', message.get_content()).group()
+
     def setup_account(self, username='test-user'):
         self.csrf = self.call('POST', '/api/setup', {'username': username, 'password': 'Test-password-2026'})['csrf']
 
@@ -89,9 +117,9 @@ class ApiTestCase(unittest.TestCase):
 
 class SystemTest(ApiTestCase):
     def test_registration_allows_new_accounts_and_rejects_only_duplicate_names(self):
-        self.call('POST', '/api/register', {'username': 'ab', 'password': 'Test-password-2026'}, expected=400)
-        self.call('POST', '/api/register', {'username': 'test-user', 'password': 'short'}, expected=400)
-        result = self.call('POST', '/api/register', {'username': 'test-user', 'password': 'Test-password-2026'})
+        self.register_account({'username': 'ab', 'password': 'Test-password-2026'}, expected=400)
+        self.register_account({'username': 'test-user', 'password': 'short'}, expected=400)
+        result = self.register_account({'username': 'test-user', 'password': 'Test-password-2026'})
         self.csrf = result['csrf']
         self.assertEqual('test-user', result['username'])
         self.assertTrue(self.call('GET', '/api/session')['authenticated'])
@@ -101,12 +129,12 @@ class SystemTest(ApiTestCase):
         self.csrf = ''
         self.assertEqual('', self.call('GET', '/api/session')['username'])
         self.assertFalse(self.call('GET', '/api/session')['authenticated'])
-        result = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Different-password'})
+        result = self.register_account({'username': 'second-user', 'password': 'Different-password'})
         self.csrf = result['csrf']
         self.assertEqual('second-user', self.call('GET', '/api/session')['username'])
         self.assertEqual([], self.call('GET', '/api/papers'))
-        self.call('POST', '/api/register', {'username': 'test-user', 'password': 'Different-password'}, expected=409)
-        self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Different-password'}, expected=409)
+        self.register_account({'username': 'test-user', 'password': 'Different-password'}, expected=409)
+        self.register_account({'username': 'second-user', 'password': 'Different-password'}, expected=409)
         self.assertEqual('second-user', self.call('GET', '/api/session')['username'])
         self.client, self.csrf = first_client, first_csrf
         self.assertEqual('test-user', self.call('GET', '/api/session')['username'])
@@ -150,7 +178,7 @@ class SystemTest(ApiTestCase):
         first = self.create(title='账号甲的论文')
         first_client, first_csrf = self.client, self.csrf
         self.reset_client()
-        self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
         second_client, second_csrf = self.client, self.csrf
         self.assertEqual([], self.call('GET', '/api/papers'))
         self.assertEqual([], self.call('GET', '/api/customers'))
@@ -201,7 +229,7 @@ class SystemTest(ApiTestCase):
         self.csrf = self.call('POST', '/api/login', {'username': 'test-user', 'password': 'Test-password-2026'})['csrf']
         stale_client, stale_csrf = self.client, self.csrf
         self.reset_client()
-        self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
         second = self.create(title='Account B remains accessible')
         second_client, second_csrf = self.client, self.csrf
         self.client, self.csrf = first_client, first_csrf
@@ -226,7 +254,7 @@ class SystemTest(ApiTestCase):
         backup = self.call('GET', '/api/backup', raw=True)
         first_client, first_csrf = self.client, self.csrf
         self.reset_client()
-        self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
         self.create(title='替换前的第二账号论文')
         self.call('POST', '/api/restore', {'backup': base64.b64encode(backup).decode(), 'password': 'Test-password-2026'})
         self.assertEqual('second-user', self.call('GET', '/api/session')['username'])

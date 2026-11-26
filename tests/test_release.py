@@ -5,16 +5,20 @@ import io
 import json
 import os
 import pathlib
+import re
 import socket
 import struct
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
 import urllib.request
 import zipfile
+
+from smtp_fixture import Inbox
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RELEASES = sorted((ROOT / 'dist').glob('paper-desk-aliyun-*.tar.gz'))
@@ -70,14 +74,20 @@ class ReleaseTest(unittest.TestCase):
             self.assertFalse(any('Fixture' in name or 'Test' in name for name in jar.namelist()))
             self.assertIn('AccountRegistry.class', jar.namelist())
             self.assertIn('ServiceTermination.class', jar.namelist())
+            self.assertIn('SmtpMailer.class', jar.namelist())
+            self.assertIn('RecoveryCodes.class', jar.namelist())
         for name in ('db/mysql/V001__initial_schema.sql', 'db/mysql/V002__customer_cooperation_date.sql',
-                     'web/files.js', 'web/ledger.js', 'web/followups.js', 'db/mysql/V013__follow_up_tasks.sql', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'db/mysql/V008__service_termination.sql', 'db/mysql/V009__publication_fees.sql','db/mysql/V010__submission_costs_and_financial_audit.sql','deploy/backup.sh',
+                     'web/files.js', 'web/ledger.js', 'web/followups.js', 'db/mysql/V013__follow_up_tasks.sql', 'db/mysql/V014__account_recovery_email.sql', 'db/mysql/V005__paper_files.sql', 'db/mysql/V006__follow_up_reason.sql', 'db/mysql/V007__customer_classification.sql', 'db/mysql/V008__service_termination.sql', 'db/mysql/V009__publication_fees.sql','db/mysql/V010__submission_costs_and_financial_audit.sql','deploy/backup.sh',
                      'db/mysql/V003__paper_service_type.sql', 'db/mysql/V004__customer_payment_deposit.sql', 'deploy/nginx.conf.example', 'deploy/paper-desk.service',
                      'tools/backup_mysql.py', 'deploy/mysql-init.sql.example', 'deploy/backup.cron.example',
                      'config/mysql-client.example.cnf'):
-            self.assertIn(name, self.files)
+            self.assertIn(name, self.files.keys())
 
     def test_packaged_jar_can_initialize_save_pay_and_restart(self):
+        inbox = Inbox()
+        threading.Thread(target=inbox.serve_forever, daemon=True).start()
+        self.addCleanup(inbox.server_close)
+        self.addCleanup(inbox.shutdown)
         directory = ROOT / '.qa-data'
         directory.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='release smoke ', dir=directory) as temporary:
@@ -110,6 +120,8 @@ class ReleaseTest(unittest.TestCase):
             def start():
                 environment = dict(os.environ, APP_STORAGE='file')
                 process = subprocess.Popen(['java', f'-Dapp.root={folder}', f'-Dapp.port={port}',
+                    '-Dmail.host=127.0.0.1', f'-Dmail.port={inbox.server_address[1]}', '-Dmail.security=none',
+                    '-Dmail.from=noreply@example.test', '-Dmail.username=', '-Dmail.password=',
                     '-jar', str(folder / 'paper-desk.jar')], cwd=folder, env=environment,
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 for _ in range(100):
@@ -155,7 +167,14 @@ class ReleaseTest(unittest.TestCase):
                 self.assertGreater(len(call('GET', '/api/backup', raw=True)), 100)
                 first_client, first_csrf = client, csrf
                 client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-                csrf = call('POST', '/api/register', {'username': 'release-second', 'password': 'Second-package-password'})['csrf']
+                registration = {'username': 'release-second', 'password': 'Second-package-password', 'email': 'release-second@qq.com'}
+                call('POST', '/api/register/code', registration)
+                message = inbox.messages.get(timeout=3)
+                code = re.search(r'\b[0-9]{6}\b', message.get_content()).group()
+                registered = call('POST', '/api/register', {**registration, 'code': code})
+                self.assertNotIn('csrf', registered)
+                self.assertFalse(call('GET', '/api/session')['authenticated'])
+                csrf = call('POST', '/api/login', {'username': registration['username'], 'password': registration['password']})['csrf']
                 self.assertEqual([], call('GET', '/api/papers'))
                 second = call('POST', '/api/papers', {'title': '第二账号的半包论文', 'serviceType': 'half'}, expected=201)
                 self.assertEqual('half', second['serviceType'])

@@ -97,7 +97,7 @@ class TerminationTest(ApiTestCase):
         restored = self.call('GET', path)
         self.assertEqual('客户爽约', restored['termination']['reason'])
         self.assertEqual((50000, 80000, True), (restored['settlementContractCents'], restored['settlementWriterFeeCents'], restored['settlementComplete']))
-        self.csrf = self.call('POST', '/api/register', {'username': 'other-account', 'password': 'Other-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'other-account', 'password': 'Other-password-2026'})['csrf']
         self.call('POST', path + '/termination', self.termination_input(restored), expected=404)
         self.assertEqual([], self.call('GET', '/api/papers'))
 

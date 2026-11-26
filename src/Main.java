@@ -18,15 +18,21 @@ public class Main {
     private final AccountRegistry accounts;
     private final Path webRoot;
     private final int port;
+    private final SmtpMailer mailer;
+    private final RecoveryCodes recoveryCodes;
+    private final RecoveryCodes registrationCodes;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private final Map<String, List<Long>> attempts = new ConcurrentHashMap<>();
     private record Session(String csrf, long expires, ApplicationStore store) {}
     private static final long SESSION_MS = 8 * 60 * 60 * 1000L;
 
-    private Main(ApplicationStore store, Path data, Path web, int port) {
+    private Main(ApplicationStore store, Path data, Path web, int port, DatabaseConfig config) {
         this.accounts = new AccountRegistry(store, data);
         this.webRoot = web;
         this.port = port;
+        this.mailer=new SmtpMailer(config);
+        this.recoveryCodes=new RecoveryCodes(mailer::sendCode);
+        this.registrationCodes=new RecoveryCodes(mailer::sendRegistrationCode);
     }
 
     public static void main(String[] args) throws Exception {
@@ -50,7 +56,7 @@ public class Main {
         HttpServer server;
         try {
             ApplicationStore store = config.storage.equals("mysql") ? new MysqlStore(config) : new Vault(data);
-            app = new Main(store, data, root.resolve("web"), port);
+            app = new Main(store, data, root.resolve("web"), port, config);
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         } catch (Exception e) {
             lock.release();
@@ -97,9 +103,31 @@ public class Main {
             }
             if (path.equals("/api/session") && method.equals("GET")) {
                 Session session = session(ex);
-                json(ex, 200, Map.ofEntries(Map.entry("initialized",accounts.initialized()),Map.entry("authenticated",session!=null),Map.entry("username",session==null?"":session.store().username()),Map.entry("csrf",session==null?"":session.csrf()),Map.entry("storage",accounts.storageType()),Map.entry("fileMaxBytes",AttachmentService.maxBytes()),Map.entry("customerReceiptTotalsSupported",true),Map.entry("customerReceiptsSupported",true),Map.entry("writerPaymentsSupported",true),Map.entry("terminationSupported",true),Map.entry("publicationFeesSupported",true))); return;
+                json(ex, 200, Map.ofEntries(Map.entry("initialized",accounts.initialized()),Map.entry("authenticated",session!=null),Map.entry("username",session==null?"":session.store().username()),Map.entry("csrf",session==null?"":session.csrf()),Map.entry("storage",accounts.storageType()),Map.entry("recoveryEmail",session==null?"":accounts.recoveryEmail(session.store().username())),Map.entry("fileMaxBytes",AttachmentService.maxBytes()),Map.entry("customerReceiptTotalsSupported",true),Map.entry("customerReceiptsSupported",true),Map.entry("writerPaymentsSupported",true),Map.entry("terminationSupported",true),Map.entry("publicationFeesSupported",true))); return;
             }
-            if ((path.equals("/api/setup") || path.equals("/api/register") || path.equals("/api/login")) && method.equals("POST")) {
+            if(path.equals("/api/register/code")&&method.equals("POST")) {
+                Map<String,Object> body=body(ex);
+                String username=Vault.validateUsername(string(body,"username")),email=AccountRegistry.registrationEmail(string(body,"email"));
+                if(!mailer.configured())throw new ApiException(503,"邮箱验证码服务尚未配置，请联系管理员");
+                synchronized(accounts) {
+                    accounts.requireRegistrationAvailable(username);
+                    registrationCodes.send(username,email,ex.getRemoteAddress().getAddress().getHostAddress(),true);
+                }
+                json(ex,200,Map.of("message","注册验证码已发送至 QQ 邮箱，请查收。","retryAfter",60));return;
+            }
+            if(path.equals("/api/register")&&method.equals("POST")) {
+                throttle(ex);Map<String,Object> body=body(ex);
+                String username=Vault.validateUsername(string(body,"username")),password=string(body,"password"),email=AccountRegistry.registrationEmail(string(body,"email"));
+                Vault.validatePassword(password);
+                synchronized(accounts) {
+                    accounts.requireRegistrationAvailable(username);
+                    registrationCodes.consume(username,email,string(body,"code"),ex.getRemoteAddress().getAddress().getHostAddress());
+                    accounts.register(username,password,email);registrationCodes.invalidate(username);
+                    attempts.remove(ex.getRemoteAddress().getAddress().getHostAddress());
+                }
+                json(ex,200,Map.of("ok",true,"username",username,"message","注册成功，请使用账号和密码登录。"));return;
+            }
+            if ((path.equals("/api/setup") || path.equals("/api/login")) && method.equals("POST")) {
                 throttle(ex);
                 Map<String, Object> credentials = body(ex);
                 String username = string(credentials, "username"), password = string(credentials, "password");
@@ -107,13 +135,34 @@ public class Main {
                 synchronized (accounts) {
                     ApplicationStore store = switch (path) {
                         case "/api/login" -> accounts.login(username, password);
-                        case "/api/register" -> accounts.register(username, password);
                         default -> accounts.setup(username, password);
                     };
                     attempts.remove(ex.getRemoteAddress().getAddress().getHostAddress());
-                    json(ex, 200, Map.of("csrf", newSession(ex, store), "username", store.username()));
+                    json(ex, 200, Map.of("csrf", newSession(ex, store), "username", store.username(),"recoveryEmail",accounts.recoveryEmail(store.username())));
                 }
                 return;
+            }
+            if(path.equals("/api/password-reset/code")&&method.equals("POST")) {
+                Map<String,Object> body=body(ex);
+                String username=Vault.validateUsername(string(body,"username")),email=SmtpMailer.email(string(body,"email"));
+                if(!mailer.configured())throw new ApiException(503,"邮箱验证码服务尚未配置，请联系管理员");
+                synchronized(accounts) {
+                    String bound="";
+                    try { bound=accounts.recoveryEmail(username); } catch(ApiException error){if(error.status!=404)throw error;}
+                    recoveryCodes.send(username,email,ex.getRemoteAddress().getAddress().getHostAddress(),email.equals(bound));
+                }
+                json(ex,200,Map.of("message","如果账号与绑定邮箱匹配，验证码将发送至该邮箱，请查收。","retryAfter",60));return;
+            }
+            if(path.equals("/api/password-reset")&&method.equals("POST")) {
+                Map<String,Object> body=body(ex);
+                String username=Vault.validateUsername(string(body,"username")),email=SmtpMailer.email(string(body,"email")),next=string(body,"newPassword");
+                Vault.validatePassword(next);
+                synchronized(accounts) {
+                    recoveryCodes.consume(username,email,string(body,"code"),ex.getRemoteAddress().getAddress().getHostAddress());
+                    if(!email.equals(accounts.recoveryEmail(username)))throw new ApiException(400,"验证码不正确或已失效，请重新获取");
+                    ApplicationStore store=accounts.resetPassword(username,next);invalidateSessions(store);recoveryCodes.invalidate(username);
+                }
+                json(ex,200,Map.of("ok",true));return;
             }
             Session session = session(ex);
             if (session == null) throw new ApiException(401, "登录已失效，请重新登录");
@@ -121,6 +170,9 @@ public class Main {
             ApplicationStore vault = session.store();
             PaperService papers = new PaperService(vault);
             BusinessService business = new BusinessService(vault);
+            if(path.equals("/api/account/recovery-email")&&method.equals("GET")) {
+                json(ex,200,Map.of("email",accounts.recoveryEmail(vault.username())));return;
+            }
             if (path.equals("/api/logout") && method.equals("POST")) {
                 sessions.remove(cookie(ex));
                 ex.getResponseHeaders().set("Set-Cookie", "paper_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
@@ -132,6 +184,7 @@ public class Main {
                 synchronized (accounts) {
                     if (session(ex) != session) throw new ApiException(401, "登录已失效，请重新登录");
                     vault.changePassword(string(body, "currentPassword"), string(body, "newPassword"));
+                    recoveryCodes.invalidate(vault.username());
                     invalidateSessions(vault);
                     json(ex, 200, Map.of("csrf", newSession(ex, vault)));
                 }
@@ -243,7 +296,7 @@ public class Main {
             }
             throw new ApiException(404, "请求的内容不存在");
         } catch (ApiException e) {
-            if (e.status == 401) json(ex, e.status, Map.of("error", e.getMessage(), "authenticated", session(ex) != null));
+            if (e.status == 401) json(ex, e.status, Map.of("error", e.getMessage(), "authenticated", session(ex) != null,"code",ex.getRequestURI().getPath().equals("/api/login")?"INVALID_CREDENTIALS":"UNAUTHORIZED"));
             else json(ex, e.status, Map.of("error", e.getMessage()));
         }
         catch (Exception e) {
@@ -289,7 +342,7 @@ public class Main {
     }
 
     private void invalidateSessions(ApplicationStore store) {
-        sessions.entrySet().removeIf(entry -> entry.getValue().store() == store);
+        sessions.entrySet().removeIf(entry -> entry.getValue().store().username().equals(store.username()));
     }
 
     private String newSession(HttpExchange ex, ApplicationStore store) {

@@ -524,7 +524,7 @@ class MysqlTest(ApiTestCase):
         self.setup_account()
         first = self.upload(self.create(title='云端迁移的第一账号论文'))
         self.reset_client()
-        self.csrf = self.call('POST', '/api/register', {'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
+        self.csrf = self.register_account({'username': 'second-user', 'password': 'Second-password-2026'})['csrf']
         second = self.upload(self.create(title='云端迁移的第二账号论文'))
         options = self.data / 'backup-client.cnf'
         options.write_text('[client]\nhost=127.0.0.1\nport={}\nuser=root\n'.format(self.mysql_port), encoding='utf-8')
