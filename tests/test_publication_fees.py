@@ -5,6 +5,54 @@ from test_system import ApiTestCase
 
 
 class PublicationFeesTest(ApiTestCase):
+    def test_pending_fee_estimates_recalculate_after_confirmation_and_restore(self):
+        self.setup_account()
+        paper=self.publication_paper(publicationFeeMode='pending')
+        path='/api/papers/'+paper['id']
+        self.assertEqual((True,800000,0),(paper['profitEstimateKnown'],paper['estimatedProfitCents'],paper['publicationFeeTotalCents']))
+        self.assertFalse(paper['publicationFees'][0]['known'])
+        self.assertFalse(paper['profitSettled'])
+        paper=self.publication_tx(paper,'outgoing_other','20.05')
+        paper=self.publication_tx(paper,'incoming_other','10')
+        self.assertEqual(798995,paper['estimatedProfitCents'])
+        transactions=paper['transactions']
+        paper=self.publication_terms(paper,publicationFeeMode='included',publicationFeeAmount='1500.25')
+        self.assertEqual((648970,150025),(paper['estimatedProfitCents'],paper['publicationPayableCents']))
+        self.assertEqual(transactions,paper['transactions'])
+        paper=self.publication_terms(paper,publicationFeeMode='pending')
+        self.assertEqual((798995,0),(paper['estimatedProfitCents'],paper['publicationFeeTotalCents']))
+        backup=self.call('GET','/api/backup',raw=True)
+        self.publication_terms(paper,publicationFeeMode='included',publicationFeeAmount='100')
+        self.call('POST','/api/restore',{'backup':base64.b64encode(backup).decode(),'password':'Test-password-2026'})
+        self.process.terminate();self.process.wait(timeout=10);self.reset_client();self.start_server()
+        self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
+        restored=self.call('GET',path)
+        self.assertEqual(('pending',798995,transactions),(restored['publicationFeeMode'],restored['estimatedProfitCents'],restored['transactions']))
+        restored=self.publication_terms(restored,publicationFeeMode='included',publicationFeeAmount='1500.25')
+        self.assertEqual(648970,restored['estimatedProfitCents'])
+
+    def test_pending_resubmission_keeps_confirmed_historical_cost_in_estimate(self):
+        self.setup_account()
+        paper=self.publication_paper(publicationFeeMode='included',publicationFeeAmount='800')
+        path='/api/papers/'+paper['id']
+        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'Original journal',
+            'status':'已拒稿','submittedAt':datetime.date.today().isoformat()},expected=201)
+        paper=self.publication_tx(paper,'outgoing_publication','300')
+        old_account=paper['publicationFees'][0]['id']
+        paper=self.call('POST',path+'/submissions',{'version':paper['version'],'journal':'New journal',
+            'publicationFeeMode':'pending'},expected=201)
+        paper=self.call('GET',path)
+        transactions=paper['transactions']
+        self.assertEqual((80000,720000,True),(paper['publicationFeeTotalCents'],paper['estimatedProfitCents'],paper['profitEstimateKnown']))
+        current=next(a for a in paper['publicationFees'] if a['current'])
+        self.assertFalse(current['known'])
+        paper=self.publication_terms(paper,publicationAccountId=old_account,publicationSettlementStatus='confirmed',
+            publicationFinalAmount='300',confirmPublicationFinal=True,reason='Original journal keeps paid amount')
+        self.assertEqual(770000,paper['estimatedProfitCents'])
+        paper=self.publication_terms(paper,publicationAccountId=current['id'],publicationFeeMode='included',publicationFeeAmount='1200.15')
+        self.assertEqual((150015,649985),(paper['publicationFeeTotalCents'],paper['estimatedProfitCents']))
+        self.assertEqual(transactions,paper['transactions'])
+
     def test_resubmission_reconfirms_fees_preserves_payments_and_updates_profit(self):
         self.setup_account()
         paper=self.publication_paper(publicationFeeMode='included',publicationFeeAmount='800')
@@ -71,7 +119,8 @@ class PublicationFeesTest(ApiTestCase):
         for mode in ['pending','free','author']:
             paper=self.publication_paper(publicationFeeMode=mode,publicationFeeAmount='9999')
             self.assertEqual((0,0,0),(paper['publicationFeeCents'],paper['publicationPaidCents'],paper['netCents']))
-            self.assertEqual(None if mode=='pending' else 800000,paper['estimatedProfitCents'])
+            self.assertEqual(800000,paper['estimatedProfitCents'])
+            self.assertTrue(paper['profitEstimateKnown'])
             self.publication_tx(paper,'outgoing_publication','1',expected=400)
             self.publication_tx(paper,'incoming_publication_refund','1',expected=400)
         half=self.publication_paper(serviceType='half',writerFee='0',writerDepositAmount='0',publicationFeeMode='included',publicationFeeAmount='500')
@@ -117,7 +166,8 @@ class PublicationFeesTest(ApiTestCase):
         paper=self.publication_tx(paper,'incoming_publication_refund','1000')
         self.assertTrue(paper['settlementComplete']);self.assertEqual(250000,paper['settledProfitCents'])
         paper=self.publication_terms(paper,publicationFeeMode='pending')
-        self.assertFalse(paper['settlementComplete']);self.assertIsNone(paper['estimatedProfitCents'])
+        self.assertFalse(paper['settlementComplete']);self.assertEqual(250000,paper['estimatedProfitCents'])
+        self.assertFalse(paper['profitSettled']);self.assertIsNone(paper['settledProfitCents'])
         paper=self.publication_terms(paper,publicationFeeMode='free')
         self.assertTrue(paper['settlementComplete'])
 

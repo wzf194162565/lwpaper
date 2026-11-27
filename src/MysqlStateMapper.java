@@ -34,7 +34,7 @@ final class MysqlStateMapper {
     static final Table FINANCIAL_AUDIT=table("lw_financial_audit","id",s("id","id"),s("paper_id","paperId"),s("action","action"),s("actor","actor"),t("event_at","at"),s("transaction_id","transactionId"),s("reversal_of","reversalOf"),s("corrects_transaction_id","correctsTransactionId"),s("publication_account_id","publicationAccountId"),s("file_id","fileId"),s("type","type"),n("amount_cents","amountCents"),d("occurred_at","date"),s("method","method"),s("note","note"),s("reason","reason"),s("writer_id","writerId"),s("writer_assignment_id","writerAssignmentId"),s("writer_name","writerName"));
     static final Table FOLLOW_UPS=table("lw_follow_up","id",s("id","id"),s("paper_id","paperId"),s("content","content"),d("follow_up_date","date"),s("status","status"),s("note","note"),s("closed_at","closedAt"),t("created_at","createdAt"),t("updated_at","updatedAt"));
     static final Table FOLLOW_UP_HISTORY=table("lw_follow_up_history","id",s("id","id"),s("paper_id","paperId"),s("content","content"),d("follow_up_date","date"),s("status","status"),s("note","note"),s("closed_at","closedAt"),t("created_at","createdAt"),t("updated_at","updatedAt"),s("task_id","taskId"),t("event_at","at"));
-    static final Table WRITERS = table("lw_writer","id",s("id","id"),s("name","name"),s("phone","phone"),s("email","email"),s("wechat","wechat"),s("specialties","specialties"),s("notes","notes"),s("status","status"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"));
+    static final Table WRITERS = table("lw_writer","id",s("id","id"),s("name","name"),s("phone","phone"),s("email","email"),s("wechat","wechat"),s("specialties","specialties"),s("notes","notes"),s("status","status"),n("version","version"),t("created_at","createdAt"),t("updated_at","updatedAt"),t("deleted_at","deletedAt"));
     static final Table ASSIGNMENTS=table("lw_writer_assignment","id",s("id","id"),s("paper_id","paperId"),s("writer_id","writerId"),s("writer_name","writer"),n("fee_cents","writerFeeCents"),n("deposit_cents","writerDepositCents"),n("final_cents","finalCents"),s("status","writingStatus"),d("start_at","writingStartAt"),d("due_at","writingDueAt"),d("delivered_at","writingDeliveredAt"),s("reason","reason"),s("closed_at","closedAt"),t("created_at","createdAt"));
     static final List<Table> TABLES = List.of(WRITERS,CUSTOMERS,PAPERS,WRITING,ASSIGNMENTS,FILES,SUBMISSIONS,CREDENTIALS,COST_ACCOUNTS,TRANSACTIONS,FINANCIAL_AUDIT,HISTORY,CURRENT,TERMINATIONS,PUBLICATION_FEES,FOLLOW_UPS,FOLLOW_UP_HISTORY);
 
@@ -153,7 +153,7 @@ final class MysqlStateMapper {
             int index=1;if(!existing)statement.setString(index++,workspace);
             for(Column column:table.columns) {
                 Object value=row.values.get(column.sql);
-                if(value==null)statement.setNull(index, column.kind==Kind.DATE?Types.DATE:Types.VARCHAR);
+                if(value==null)statement.setNull(index, column.kind==Kind.DATE?Types.DATE:column.kind==Kind.TIME?Types.TIMESTAMP:Types.VARCHAR);
                 else switch(column.kind) {
                     case NUMBER -> statement.setLong(index,((Number)value).longValue());
                     case TIME -> statement.setObject(index,LocalDateTime.ofInstant((Instant)value,ZoneOffset.UTC));
@@ -208,7 +208,7 @@ final class MysqlStateMapper {
         for(Column column:table.columns) {
             Object value=switch(column.kind) {
                 case NUMBER -> PaperService.number(source.getOrDefault(column.field,0));
-                case TIME -> Instant.parse(Main.string(source,column.field)).truncatedTo(ChronoUnit.MICROS);
+                case TIME -> table==WRITERS&&column.field.equals("deletedAt")&&Main.string(source,column.field).isEmpty()?null:Instant.parse(Main.string(source,column.field)).truncatedTo(ChronoUnit.MICROS);
                 default -> Main.string(source,column.field);
             };
             if(column.sql.equals(table.key))key=value.toString();

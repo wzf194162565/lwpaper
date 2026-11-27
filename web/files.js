@@ -57,7 +57,7 @@ function binaryRequest(path,file,headers={},form=null) {
 }
 async function uploadManuscript(p,file,form) {
  fileTransferBusy=true;
- if(!fileUploadTokens.has(file))fileUploadTokens.set(file,crypto.randomUUID());
+ if(!fileUploadTokens.has(file))fileUploadTokens.set(file,randomUuid());
  try{return await binaryRequest(`/api/papers/${encodeURIComponent(p.id)}/files`,file,{'X-Paper-Version':String(p.version),'X-Upload-Id':fileUploadTokens.get(file),'X-File-Name':encodeURIComponent(file.name),'X-File-Note':encodeURIComponent($('#manuscript-note',form)?.value||'')},form);}
  finally{fileTransferBusy=false;}
 }

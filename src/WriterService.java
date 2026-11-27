@@ -8,22 +8,27 @@ public final class WriterService {
         return Json.array(state.getOrDefault("writers",List.of()));
     }
     static String nameKey(String name) { return name.strip().toLowerCase(Locale.ROOT); }
+    static boolean deleted(Map<String,Object> profile) { return !Main.string(profile,"deletedAt").isEmpty(); }
     static boolean needsSync(Map<String,Object> state) {
-        Set<String> names=new HashSet<>();for(Object item:profiles(state))names.add(nameKey(Main.string(Json.object(item),"name")));
         for(Object item:Json.array(state.get("papers"))) {
             Map<String,Object> p=Json.object(item);String name=Main.string(p,"writer").strip();
-            if(BusinessService.hasWriting(p)&&(!p.containsKey("writerAssignments")||(!name.isEmpty()&&!names.contains(nameKey(name)))))return true;
+            if(BusinessService.hasWriting(p)&&(!p.containsKey("writerAssignments")||(!name.isEmpty()&&Main.string(p,"writerId").isEmpty())))return true;
         }
         return false;
     }
     static void sync(Map<String,Object> state) {
         if(!state.containsKey("writers"))state.put("writers",new ArrayList<>());
-        Set<String> names=new HashSet<>();for(Object item:profiles(state))names.add(nameKey(Main.string(Json.object(item),"name")));
+        Map<String,Map<String,Object>> byName=new HashMap<>();
+        for(Object item:profiles(state)){Map<String,Object>w=Json.object(item);if(!deleted(w))byName.put(nameKey(Main.string(w,"name")),w);}
         for(Object item:Json.array(state.get("papers"))) {
             Map<String,Object> p=Json.object(item);String name=Main.string(p,"writer").strip();
-            if(BusinessService.hasWriting(p)&&!name.isEmpty()&&names.add(nameKey(name)))profiles(state).add(newProfile(Map.of("name",name)));
             if(BusinessService.hasWriting(p)) {
-                if(!p.containsKey("writerId"))for(Object w:profiles(state))if(nameKey(Main.string(Json.object(w),"name")).equals(nameKey(name)))p.put("writerId",Json.object(w).get("id"));
+                // Existing IDs, including deleted profiles, own their historical assignments.
+                if(!name.isEmpty()&&Main.string(p,"writerId").isEmpty()) {
+                    Map<String,Object>w=byName.get(nameKey(name));
+                    if(w==null){w=newProfile(Map.of("name",name));profiles(state).add(w);byName.put(nameKey(name),w);}
+                    p.put("writerId",w.get("id"));
+                }
                 WriterAssignments.initialize(p);
             }
         }
@@ -34,12 +39,12 @@ public final class WriterService {
     }
     public List<Object> list() throws Exception {
         ensure();Map<String,Object> state=store.read();List<Object> result=new ArrayList<>();
-        for(Object item:profiles(state))result.add(summary(Json.object(item),state,false));
+        for(Object item:profiles(state))if(!deleted(Json.object(item)))result.add(summary(Json.object(item),state,false));
         result.sort(Comparator.comparing(o->Main.string(Json.object(o),"name")));return result;
     }
     public Map<String,Object> get(String id) throws Exception { ensure();Map<String,Object>s=store.read();return summary(find(s,id),s,true); }
     static Map<String,Object> find(Map<String,Object>s,String id) {
-        for(Object item:profiles(s))if(Main.string(Json.object(item),"id").equals(id))return Json.object(item);
+        for(Object item:profiles(s))if(!deleted(Json.object(item))&&Main.string(Json.object(item),"id").equals(id))return Json.object(item);
         throw new ApiException(404,"写作者不存在");
     }
     private static Map<String,Object> fields(Map<String,Object> input) {
@@ -56,7 +61,7 @@ public final class WriterService {
         p.put("createdAt",PaperService.now());p.put("updatedAt",PaperService.now());return p;
     }
     private static void unique(Map<String,Object>s,String name,String except) {
-        for(Object item:profiles(s)){Map<String,Object> p=Json.object(item);if(!Main.string(p,"id").equals(except)&&nameKey(Main.string(p,"name")).equals(nameKey(name)))throw new ApiException(409,"写作者姓名已存在；同名人员请在姓名中增加区分标记");}
+        for(Object item:profiles(s)){Map<String,Object> p=Json.object(item);if(!deleted(p)&&!Main.string(p,"id").equals(except)&&nameKey(Main.string(p,"name")).equals(nameKey(name)))throw new ApiException(409,"写作者姓名已存在；同名人员请在姓名中增加区分标记");}
     }
     public Map<String,Object> create(Map<String,Object> input) throws Exception {
         return store.mutate(s->{sync(s);if(profiles(s).size()>=10000)throw new ApiException(400,"写作者数量已达到上限");Map<String,Object> p=newProfile(input);unique(s,Main.string(p,"name"),"");profiles(s).add(p);return summary(p,s,true);});
@@ -64,17 +69,37 @@ public final class WriterService {
     public Map<String,Object> update(String id,Map<String,Object> input) throws Exception {
         return store.mutate(s->{sync(s);Map<String,Object> p=find(s,id);PaperService.checkVersion(p,input);
             Map<String,Object> merged=new LinkedHashMap<>(p);merged.putAll(input);Map<String,Object> next=fields(merged);
-            String old=nameKey(Main.string(p,"name")),name=Main.string(next,"name");unique(s,name,id);
-            for(Object item:Json.array(s.get("papers"))){Map<String,Object> paper=Json.object(item);if(id.equals(Main.string(paper,"writerId"))&&!Main.string(paper,"writer").equals(name)){paper.put("writer",name);PaperService.touch(paper);}}
+            String name=Main.string(next,"name");unique(s,name,id);
+            for(Object item:Json.array(s.get("papers"))){
+                Map<String,Object> paper=Json.object(item);
+                if(!id.equals(Main.string(paper,"writerId")))continue;
+                Map<String,Object> assignment=WriterAssignments.current(paper);
+                if(!Main.string(paper,"writer").equals(name)||(assignment!=null&&!Main.string(assignment,"writer").equals(name))){
+                    paper.put("writer",name);WriterAssignments.refresh(paper);PaperService.touch(paper);
+                }
+            }
             p.putAll(next);PaperService.touch(p);return summary(p,s,true);});
     }
-    public void delete(String id,Map<String,Object> input) throws Exception {
-        store.mutate(s->{sync(s);Map<String,Object> p=find(s,id);PaperService.checkVersion(p,input);
-            if(!linked(p,s).isEmpty())throw new ApiException(409,"该写作者有关联论文，请归档保留档案和账目");profiles(s).remove(p);return null;});
+    public List<String> delete(String id,Map<String,Object> input) throws Exception {
+        synchronized(store) {
+            List<Map<String,Object>> files=new ArrayList<>();
+            List<String> removed=store.mutate(s->{sync(s);Map<String,Object> p=find(s,id);PaperService.checkVersion(p,input);
+                List<Map<String,Object>> papers=linked(p,s);
+                if(!papers.isEmpty()&&!Boolean.TRUE.equals(input.get("confirmCascadeDelete")))
+                    throw new ApiException(409,"删除此写作者将同时清除全部关联论文及其投稿、写作安排、跟进、收支、稿件和凭证，请确认后重试");
+                List<String> ids=new ArrayList<>();
+                for(Map<String,Object> paper:papers){ids.add(Main.string(paper,"id"));files.addAll(AttachmentService.files(paper).stream().map(Json::object).toList());}
+                Set<String> removedIds=new HashSet<>(ids);
+                Json.array(s.get("papers")).removeIf(item->removedIds.contains(Main.string(Json.object(item),"id")));
+                profiles(s).remove(p);return ids;
+            });
+            new AttachmentService(store).removeBlobs(files);
+            return removed;
+        }
     }
     private static List<Map<String,Object>> linked(Map<String,Object>p,Map<String,Object>s) {
         String id=Main.string(p,"id");List<Map<String,Object>> result=new ArrayList<>();
-        for(Object item:Json.array(s.get("papers"))){Map<String,Object> paper=Json.object(item);if(WriterAssignments.all(paper).stream().map(Json::object).anyMatch(a->id.equals(Main.string(a,"writerId"))))result.add(paper);}return result;
+        for(Object item:Json.array(s.get("papers"))){Map<String,Object> paper=Json.object(item);if(id.equals(Main.string(paper,"writerId"))||WriterAssignments.all(paper).stream().map(Json::object).anyMatch(a->id.equals(Main.string(a,"writerId"))))result.add(paper);}return result;
     }
     private static Map<String,Object> summary(Map<String,Object> p,Map<String,Object>s,boolean detail) {
         Map<String,Object> result=new LinkedHashMap<>(p);List<Object> papers=new ArrayList<>();long agreed=0,paid=0,payable=0,recoverable=0;int active=0,delivered=0,overdue=0;
@@ -101,7 +126,11 @@ public final class WriterService {
     }
     static void validate(Map<String,Object>s) {
         Set<String> ids=new HashSet<>(),names=new HashSet<>();if(profiles(s).size()>10000)throw new IllegalArgumentException();
-        for(Object item:profiles(s)){Map<String,Object> p=Json.object(item);fields(p);UUID.fromString(Main.string(p,"id"));if(!ids.add(Main.string(p,"id"))||!names.add(nameKey(Main.string(p,"name")))||PaperService.number(p.get("version"))<1)throw new IllegalArgumentException();}
+        for(Object item:profiles(s)){
+            Map<String,Object> p=Json.object(item);fields(p);UUID.fromString(Main.string(p,"id"));
+            if(!ids.add(Main.string(p,"id"))||(!deleted(p)&&!names.add(nameKey(Main.string(p,"name"))))||PaperService.number(p.get("version"))<1)throw new IllegalArgumentException();
+            if(deleted(p)){java.time.Instant.parse(Main.string(p,"deletedAt"));if(!Main.string(p,"status").equals("archived"))throw new IllegalArgumentException();}
+        }
         WriterAssignments.validate(s,ids);
     }
     static void resolve(Map<String,Object>s,Map<String,Object>p,Map<String,Object>input) {
@@ -110,7 +139,7 @@ public final class WriterService {
             String id=PaperService.text(input,"writerId",36);p.put("writerId",id);p.put("writer",id.isEmpty()?"":find(s,id).get("name"));
         } else if(!p.containsKey("writerAssignments")) {
             String name=Main.string(p,"writer").strip();
-            if(!name.isEmpty()){Map<String,Object>w=null;for(Object o:profiles(s))if(nameKey(Main.string(Json.object(o),"name")).equals(nameKey(name)))w=Json.object(o);if(w==null){w=newProfile(Map.of("name",name));profiles(s).add(w);}p.put("writerId",w.get("id"));}
+            if(!name.isEmpty()){Map<String,Object>w=null;for(Object o:profiles(s))if(!deleted(Json.object(o))&&nameKey(Main.string(Json.object(o),"name")).equals(nameKey(name)))w=Json.object(o);if(w==null){w=newProfile(Map.of("name",name));profiles(s).add(w);}p.put("writerId",w.get("id"));}
         }
     }
 }

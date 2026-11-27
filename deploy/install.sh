@@ -25,7 +25,7 @@ fi
 if systemctl is-active --quiet paper-desk.service; then
   systemctl stop paper-desk.service
 fi
-install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/web" "$INSTALL_DIR/lib" "$INSTALL_DIR/db/mysql" "$INSTALL_DIR/deploy" "$INSTALL_DIR/tools"
+install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/web" "$INSTALL_DIR/lib" "$INSTALL_DIR/db" "$INSTALL_DIR/db/mysql" "$INSTALL_DIR/deploy" "$INSTALL_DIR/tools"
 install -d -m 0750 -o root -g paperdesk "$INSTALL_DIR/config"
 install -d -m 0700 -o paperdesk -g paperdesk "$INSTALL_DIR/data"
 install -m 0644 "$SOURCE_DIR/paper-desk.jar" "$INSTALL_DIR/"

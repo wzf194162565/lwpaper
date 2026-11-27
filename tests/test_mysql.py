@@ -24,6 +24,7 @@ import test_follow_up
 import test_follow_up_tasks
 import test_authors
 import test_writer_payments
+import test_writers
 import test_customer_types
 import test_termination
 import test_financial_rules
@@ -40,6 +41,36 @@ def free_port():
 
 @unittest.skipUnless(os.environ.get('RUN_MYSQL_TESTS') == '1', 'Set RUN_MYSQL_TESTS=1 for isolated MySQL tests')
 class MysqlTest(ApiTestCase):
+    test_writer_cascade_deletion = test_writers.WriterTest.test_deletion_clears_current_historical_papers_files_and_survives_restore
+    test_writer_deletion_conflicts = test_writers.WriterTest.test_cascade_requires_confirmation_and_version_but_not_archived_status
+    test_writer_cascade_isolation = test_writers.WriterTest.test_cascade_deletes_terminated_balances_and_preserves_other_accounts
+
+    def test_writer_deletion_migration_preserves_existing_profiles_and_retries(self):
+        self.setup_account()
+        paper=self.create(writer='Migration writer')
+        paper=self.call('GET','/api/papers/'+paper['id'])
+        writer=self.call('GET','/api/writers')[0]
+        writer=self.call('GET','/api/writers/'+writer['id'])
+        self.process.terminate();self.process.wait(timeout=10)
+        self.sql('ALTER TABLE lw_writer DROP COLUMN deleted_at')
+        self.sql('DELETE FROM lw_schema_version WHERE version=18')
+        for attempt in range(2):
+            self.reset_client();self.start_server()
+            self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
+            self.assertEqual(paper,self.call('GET','/api/papers/'+paper['id']))
+            self.assertEqual(writer,self.call('GET','/api/writers/'+writer['id']))
+            self.assertEqual('1',self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=18'))
+            if attempt==0:
+                self.process.terminate();self.process.wait(timeout=10)
+                self.sql('DELETE FROM lw_schema_version WHERE version=18')
+        writer=self.call('PUT','/api/writers/'+writer['id'],{'version':writer['version'],'status':'archived'})
+        self.call('DELETE','/api/writers/'+writer['id'],{'version':writer['version'],'confirmCascadeDelete':True})
+        self.assertEqual('0',self.sql('SELECT COUNT(*) FROM lw_writer'))
+        for table in ('lw_paper','lw_writing_task','lw_writer_assignment','lw_submission','lw_paper_history'):
+            self.assertEqual('0',self.sql('SELECT COUNT(*) FROM '+table))
+        self.assertEqual([],self.call('GET','/api/writers'))
+
+    test_writer_rename_current_assignment = test_writers.WriterTest.test_renaming_writer_updates_current_assignment_and_new_payments_only
     today = test_cost_ledger.CostLedgerTest.today
     cost_paper = test_cost_ledger.CostLedgerTest.cost_paper
     cost_transaction = test_cost_ledger.CostLedgerTest.cost_transaction
@@ -51,6 +82,8 @@ class MysqlTest(ApiTestCase):
     test_audit_submission_date_entry_points = test_logic_audit.LogicAuditTest.test_paper_progress_changes_require_actual_submission_dates_atomically
     test_audit_initial_publication_dates = test_logic_audit.LogicAuditTest.test_new_published_papers_initialize_publication_dates_and_duration
     test_publication_resubmission = test_publication_fees.PublicationFeesTest.test_resubmission_reconfirms_fees_preserves_payments_and_updates_profit
+    test_pending_publication_estimate = test_publication_fees.PublicationFeesTest.test_pending_fee_estimates_recalculate_after_confirmation_and_restore
+    test_pending_resubmission_estimate = test_publication_fees.PublicationFeesTest.test_pending_resubmission_keeps_confirmed_historical_cost_in_estimate
     publication_paper = test_publication_fees.PublicationFeesTest.publication_paper
     publication_tx = test_publication_fees.PublicationFeesTest.publication_tx
     publication_terms = test_publication_fees.PublicationFeesTest.publication_terms
@@ -70,7 +103,8 @@ class MysqlTest(ApiTestCase):
             self.csrf=self.call('POST','/api/login',{'username':'test-user','password':'Test-password-2026'})['csrf']
             restored=self.call('GET','/api/papers/'+paper['id'])
             self.assertEqual(paper['title'],restored['title'])
-            self.assertEqual('pending',restored['publicationFeeMode']);self.assertIsNone(restored['estimatedProfitCents'])
+            self.assertEqual('pending',restored['publicationFeeMode'])
+            self.assertEqual(restored['contractCents']-restored['writerFeeCents'],restored['estimatedProfitCents'])
             self.assertEqual('1',self.sql('SELECT COUNT(*) FROM lw_schema_version WHERE version=9'))
             if attempt==0:
                 self.process.terminate();self.process.wait(timeout=10)
@@ -643,3 +677,49 @@ class MysqlTest(ApiTestCase):
         self.assertEqual('local-account', self.call('GET', '/api/session')['username'])
         self.assertEqual(paper['id'], self.call('GET', '/api/papers')[0]['id'])
         self.assertEqual('private-secret-42', self.call('POST', f"/api/papers/{paper['id']}/credentials")['password'])
+
+    def test_cross_account_restore_reidentifies_followups_and_their_history(self):
+        self.setup_account()
+        paper=self.create(followUpAt='2030-01-01',followUpReason='Original task')
+        path='/api/papers/'+paper['id']
+        task=paper['followUps'][0]
+        paper=self.call('PUT',path+'/followups/'+task['id'],{
+            'version':paper['version'],'status':'completed','note':'Completed before backup'})
+        paper=self.call('POST',path+'/followups',{
+            'version':paper['version'],'content':'Second task','date':'2030-01-02'},expected=201)
+        plain=self.call('GET','/api/backup',raw=True)
+        paper=self.upload(paper)
+        paper=self.call('GET',path)
+        archive=self.call('GET','/api/backup',raw=True)
+        original_client,original_csrf=self.client,self.csrf
+        self.reset_client()
+        self.csrf=self.register_account({'username':'followup-copy','password':'Copy-password-2026'})['csrf']
+        for zipped,backup in ((False,plain),(True,archive)):
+            if zipped:
+                self.binary('/api/restore-archive',backup,headers={'X-Backup-Password':'Test-password-2026'},expected=200)
+            else:
+                self.call('POST','/api/restore',{'backup':base64.b64encode(backup).decode(),'password':'Test-password-2026'})
+            restored=self.call('GET','/api/papers')[0]
+            restored=self.call('GET','/api/papers/'+restored['id'])
+            self.assertNotEqual(paper['id'],restored['id'])
+            self.assertEqual(2,len(restored['followUps']))
+            self.assertEqual(3,len(restored['followUpHistory']))
+            original_tasks={t['id'] for t in paper['followUps']}
+            new_tasks={t['id'] for t in restored['followUps']}
+            self.assertTrue(original_tasks.isdisjoint(new_tasks))
+            self.assertTrue({e['id'] for e in paper['followUpHistory']}.isdisjoint(
+                {e['id'] for e in restored['followUpHistory']}))
+            self.assertTrue(all(e['taskId'] in new_tasks for e in restored['followUpHistory']))
+            self.assertEqual(sorted((t['content'],t['status']) for t in paper['followUps']),
+                             sorted((t['content'],t['status']) for t in restored['followUps']))
+            self.assertEqual(int(zipped),len(restored['files']))
+            if zipped:self.assertEqual(test_files.PDF,self.download_file(restored))
+        target_client,target_csrf=self.client,self.csrf
+        self.client,self.csrf=original_client,original_csrf
+        self.assertEqual(paper,self.call('GET',path))
+        self.client,self.csrf=target_client,target_csrf
+        self.process.terminate();self.process.wait(timeout=10);self.reset_client();self.start_server()
+        self.csrf=self.call('POST','/api/login',{'username':'followup-copy','password':'Copy-password-2026'})['csrf']
+        persisted=self.call('GET','/api/papers/'+restored['id'])
+        self.assertEqual(restored['followUps'],persisted['followUps'])
+        self.assertEqual(restored['followUpHistory'],persisted['followUpHistory'])

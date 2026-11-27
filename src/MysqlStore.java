@@ -206,6 +206,9 @@ public final class MysqlStore implements ApplicationStore {
             for(Object event:FinancialLedger.audits(paper))remapIds(Json.object(event),ids,"id","transactionId","reversalOf","correctsTransactionId","publicationAccountId","writerId","writerAssignmentId");
             for(Object file:AttachmentService.files(paper))remapIds(Json.object(file),ids,"transactionId");
             for(Object event:Json.array(paper.get("history")))remapIds(Json.object(event),ids,"id","submissionId");
+            FollowUps.initialize(paper);
+            for(Object task:FollowUps.tasks(paper))remapIds(Json.object(task),ids,"id");
+            for(Object event:Json.array(paper.get("followUpHistory")))remapIds(Json.object(event),ids,"id","taskId");
         }
     }
     private static void remapIds(Map<String,Object> entity,Map<String,String> ids,String... fields) {
@@ -287,10 +290,21 @@ public final class MysqlStore implements ApplicationStore {
                 migrateLoginPasswordCopy(c);
                 migrateWriters(c);
                 migrateWriterAssignments(c);
+                migrateWriterProfileDeletion(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
         }
+    }
+    private void migrateWriterProfileDeletion(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V018__writer_profile_deletion.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=18");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V018 数据库迁移脚本校验不一致");return;}
+        String column=scalar(c,"SELECT CONCAT(data_type,':',is_nullable) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='lw_writer' AND column_name='deleted_at'");
+        if(column.isEmpty())try(Statement statement=c.createStatement()){statement.execute(script.strip().replaceFirst(";$",""));}
+        else if(!column.equals("datetime:YES"))throw new IllegalStateException("写作者删除标记字段与 V018 不一致");
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(18,?,?,UTC_TIMESTAMP(6))","删除写作者档案并保留业务历史",checksum);
     }
     private void migrateWriterAssignments(Connection c) throws Exception {
         String script=Files.readString(config.root.resolve("db/mysql/V017__writer_assignments.sql"),StandardCharsets.UTF_8);

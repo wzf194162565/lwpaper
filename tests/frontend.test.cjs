@@ -5,13 +5,13 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function app() {
+function app(browserCrypto=require('node:crypto').webcrypto) {
  const nodes = new Map();
  const handlers = new Map();
  const node = () => ({innerHTML:'',textContent:'',style:{},childNodes:[],isConnected:true,
   append(){},remove(){},focus(){},hasChildNodes(){return !!this.innerHTML;},querySelector(){return null;}});
  for(const id of ['#root','#content','#results','#overlay-root','#toast-root'])nodes.set(id,node());
- const context = vm.createContext({console,Blob,URL,Intl,Date,crypto:require('node:crypto').webcrypto,setTimeout:()=>1,clearTimeout(){},requestAnimationFrame(){},
+ const context = vm.createContext({console,Blob,URL,Intl,Date,crypto:browserCrypto,setTimeout:()=>1,clearTimeout(){},requestAnimationFrame(){},
   fetch:async()=>({ok:true,json:async()=>({initialized:false,authenticated:false,csrf:'',writerPaymentsSupported:true,customerReceiptsSupported:true,customerReceiptTotalsSupported:true})}),
   document:{querySelector:selector=>nodes.get(selector)||null,addEventListener(type,handler){if(!handlers.has(type))handlers.set(type,[]);handlers.get(type).push(handler);},createElement:node,body:node(),activeElement:null},
   window:{addEventListener(){}}});
@@ -41,9 +41,10 @@ test('writer management renders profile data and statements without exposing sub
  run(`state.csrf='writer-session';state.view='writers';writerOwner=state.csrf;
   writerProfiles=[{id:'writer-1',name:'Writer <one>',status:'active',phone:'123',email:'a@example.test',wechat:'wx',specialties:'Engineering',notes:'Notes',paperCount:2,activeCount:1,deliveredCount:1,overdueCount:0,agreedCents:100000,paidCents:30000,payableCents:70000,recoverableCents:0}];
   renderShell();`);
- assert.match(nodes.get('#content').innerHTML,/写作者管理/);
+ assert.match(nodes.get('#content').innerHTML,/写作管理/);
  assert.match(nodes.get('#results').innerHTML,/Writer &lt;one&gt;/);
  assert.match(nodes.get('#results').innerHTML,/¥700\.00/);
+ assert.match(nodes.get('#results').innerHTML,/data-action="delete-writer" data-id="writer-1"/);
  run("state.status='archived'");assert.equal(run('writerRows().length'),0);
  run("state.status='';state.drawer={kind:'writer-detail',writer:{...writerProfiles[0],papers:state.papers.slice(0,1)}};renderWriterDetail()");
  assert.match(nodes.get('#overlay-root').innerHTML,/任务与对账/);
@@ -52,6 +53,127 @@ test('writer management renders profile data and statements without exposing sub
  run("api=async()=>state.drawer.writer;download=(name,blob)=>{globalThis.writerCSV=blob;}");
  await run("exportWriterStatement('writer-1')");
  const csv=await run('writerCSV').text();assert.match(csv,/待追回/);assert.doesNotMatch(csv,/private-secret/);
+});
+
+test('writer deletion from the list or detail confirms the selected writer and keeps other profiles',async()=>{
+ for(const inDetail of [false,true]){
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+  run(`state.authenticated=true;state.csrf='writer-session';state.view='writers';writerOwner=state.csrf;
+   writerProfiles=[{id:'writer-1',name:'Writer <one>',status:'active',paperCount:0,version:1,papers:[]},
+    {id:'writer-2',name:'Other writer',status:'active',paperCount:0,version:1,papers:[]}];
+   globalThis.availableWriters=writerProfiles.slice();globalThis.deletions=[];
+   api=async(url,options={})=>{
+    if(options.method==='DELETE'){deletions.push({url,data:JSON.parse(options.body)});availableWriters=availableWriters.filter(w=>url!=='/api/writers/'+w.id);return {ok:true};}
+    if(url==='/api/writers')return availableWriters;
+    if(url==='/api/papers')return state.papers;
+    if(url==='/api/customers')return state.customers;
+    return {...availableWriters.find(w=>url==='/api/writers/'+w.id),version:4};
+   };renderShell();`);
+  if(inDetail)run("state.drawer={kind:'writer-detail',writer:writerProfiles[0]};renderWriterDetail()");
+  const action=inDetail?{action:'delete-writer'}:{action:'delete-writer',id:'writer-1'};
+  await clickAction(handlers,action);
+  assert.equal(run('deletions.length'),0);
+  assert.match(nodes.get('#overlay-root').innerHTML,/Writer &lt;one&gt;/);
+  await clickAction(handlers,{action:'cancel-modal'});
+  assert.equal(run('deletions.length'),0);
+  assert.equal(run('writerProfiles.length'),2);
+  await clickAction(handlers,{action:'delete-writer',id:'writer-1'});await clickAction(handlers,{action:'confirm-modal'});
+  assert.equal(run('deletions.length'),1);
+  assert.equal(run('deletions[0].url'),'/api/writers/writer-1');
+  assert.equal(run('deletions[0].data.version'),4);
+  assert.equal(run('deletions[0].data.confirmCascadeDelete'),true);
+  assert.equal(run('writerProfiles.length'),1);
+  assert.equal(run('writerProfiles[0].id'),'writer-2');
+  assert.equal(run('state.modal'),null);
+  assert.doesNotMatch(nodes.get('#results').innerHTML,/data-action="delete-writer" data-id="writer-1"/);
+ }
+});
+
+test('writer deletion warns that all linked records are cleared without requiring archival',async()=>{
+ const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));
+ run(`state.csrf='writer-session';globalThis.messages=[];globalThis.writes=[];
+  toast=message=>messages.push(message);
+  api=async(url,options={})=>{if(options.method)writes.push(url);return {id:'linked-writer',name:'Linked writer',paperCount:2,version:3};};`);
+ await clickAction(handlers,{action:'delete-writer',id:'linked-writer'});
+ assert.equal(run('writes.length'),0);
+ assert.equal(run('state.modal.kind'),'confirm');
+ assert.match(nodes.get('#overlay-root').innerHTML,/全部 2 篇关联论文/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/投稿、写作安排、跟进、收支、稿件和凭证/);
+ assert.doesNotMatch(nodes.get('#overlay-root').innerHTML,/先.*归档|流水会保留/);
+});
+
+test('failed writer deletion retains the confirmation and supports retry',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.authenticated=true;state.csrf='writer-session';state.view='writers';writerOwner=state.csrf;
+  writerProfiles=[{id:'writer-1',name:'Retry writer',status:'active',paperCount:0,version:3}];
+  globalThis.availableWriters=writerProfiles.slice();globalThis.allowDelete=false;globalThis.attempts=0;
+  api=async(url,options={})=>{
+   if(options.method==='DELETE'){attempts++;if(!allowDelete)throw new Error('删除失败，请重试');availableWriters=[];return {ok:true};}
+   if(url==='/api/papers')return state.papers;
+   if(url==='/api/customers')return state.customers;
+   return url==='/api/writers'?availableWriters:availableWriters[0];
+  };renderShell();`);
+ await clickAction(handlers,{action:'delete-writer',id:'writer-1'});
+ await clickAction(handlers,{action:'confirm-modal'});
+ assert.equal(run('writerProfiles.length'),1);
+ assert.equal(run('state.modal.kind'),'confirm');
+ run('allowDelete=true');await clickAction(handlers,{action:'confirm-modal'});
+ assert.equal(run('attempts'),2);
+ assert.equal(run('writerProfiles.length'),0);
+ assert.equal(run('state.modal'),null);
+});
+
+test('confirmed writer deletion clears related papers and refreshes summaries for every status',async()=>{
+ for(const status of ['active','paused','archived'])for(const inDetail of [false,true]){
+  const {run,nodes,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+  run(`state.authenticated=true;state.csrf='writer-session';state.view='writers';writerOwner=state.csrf;
+   writerProfiles=[{id:'target-writer',name:'Target <writer>',status:'${status}',paperCount:2,version:2,papers:[state.papers[0]]}];
+   globalThis.availableWriters=writerProfiles.slice();globalThis.deletions=[];
+   globalThis.availablePapers=state.papers.slice();globalThis.originalCount=state.papers.length;
+   api=async(url,options={})=>{
+    if(options.method==='DELETE'){deletions.push({url,data:JSON.parse(options.body)});availableWriters=[];availablePapers=availablePapers.filter(p=>!['paper-0','paper-1'].includes(p.id));return {ok:true,deletedPaperIds:['paper-0','paper-1'],deletedPaperCount:2};}
+    if(url==='/api/papers')return availablePapers;
+    if(url==='/api/customers')return state.customers;
+    return url==='/api/writers'?availableWriters:{...availableWriters[0],version:5};
+   };renderShell();`);
+  if(inDetail)run("state.drawer={kind:'writer-detail',writer:writerProfiles[0]};renderWriterDetail()");
+  await clickAction(handlers,inDetail?{action:'delete-writer'}:{action:'delete-writer',id:'target-writer'});
+  assert.equal(run('deletions.length'),0);
+  assert.match(nodes.get('#overlay-root').innerHTML,/Target &lt;writer&gt;/);
+  assert.match(nodes.get('#overlay-root').innerHTML,/全部 2 篇关联论文/);
+  await clickAction(handlers,{action:'cancel-modal'});
+  assert.equal(run('writerProfiles.length'),1);
+  await clickAction(handlers,{action:'delete-writer',id:'target-writer'});
+  await clickAction(handlers,{action:'confirm-modal'});
+  assert.equal(run('deletions.length'),1);
+  assert.equal(run('deletions[0].url'),'/api/writers/target-writer');
+  assert.equal(run('deletions[0].data.version'),5);
+  assert.equal(run('deletions[0].data.confirmCascadeDelete'),true);
+  assert.equal(run('writerProfiles.length'),0);
+  assert.equal(run('state.papers.length'),run('originalCount-2'));
+  assert.equal(run("state.papers.some(p=>['paper-0','paper-1'].includes(p.id))"),false);
+  await run('loadWriterProfiles()');
+  assert.equal(run('writerProfiles.length'),0);
+ }
+});
+
+test('late writer refresh cannot resurrect a confirmed deletion',async()=>{
+ const {run,handlers}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.authenticated=true;state.csrf='writer-session';state.view='writers';writerOwner=state.csrf;
+  writerProfiles=[{id:'target',name:'Target',status:'active',paperCount:0,version:1,papers:[]}];
+  globalThis.target=writerProfiles[0];globalThis.listCalls=0;
+  api=async(url,options={})=>{
+   if(options.method==='DELETE')return {ok:true,deletedPaperIds:[]};
+   if(url==='/api/writers'){if(++listCalls===1)return new Promise(resolve=>globalThis.staleWriterList=resolve);return [];}
+   if(url==='/api/papers')return state.papers;
+   if(url==='/api/customers')return state.customers;
+   return target;
+  };globalThis.oldRefresh=loadWriterProfiles();`);
+ await clickAction(handlers,{action:'delete-writer',id:'target'});
+ await clickAction(handlers,{action:'confirm-modal'});
+ assert.equal(run('writerProfiles.length'),0);
+ run('staleWriterList([target])');await run('oldRefresh');
+ assert.equal(run('writerProfiles.length'),0);
 });
 
 test('copying a paper code writes only its code and reports clipboard failure',async()=>{
@@ -82,6 +204,73 @@ test('writer profile loading discards the response from a previous login',async(
  const {run}=app();await new Promise(resolve=>setImmediate(resolve));
  run("state.csrf='old';api=()=>new Promise(resolve=>globalThis.resolveWriters=resolve);globalThis.writerLoad=loadWriterProfiles();state.csrf='new';resolveWriters([{id:'old-profile'}]);");
  await run('writerLoad');assert.equal(run('writerProfiles.length'),0);
+});
+
+const httpCrypto=()=>({getRandomValues:bytes=>require('node:crypto').webcrypto.getRandomValues(bytes)});
+const uuidPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+test('request identifiers work with native UUIDs and HTTP random bytes',()=>{
+ const native=require('node:crypto').randomUUID();
+ const {run}=app({randomUUID:()=>native,getRandomValues(){throw new Error('Unexpected fallback');}});
+ assert.equal(run('randomUuid()'),native);
+ const http=app(httpCrypto());
+ const ids=http.run('Array.from({length:256},()=>randomUuid())');
+ assert.equal(new Set(ids).size,ids.length);
+ for(const id of ids)assert.match(id,uuidPattern);
+});
+
+test('HTTP visits can open both paper forms with independent request identifiers',async()=>{
+ const {run,nodes,handlers}=app(httpCrypto());await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run("state.view='papers';renderShell()");
+ const ids=[];
+ for(const [action,type] of [['new-paper','half'],['new-writing','full']]){
+  await clickAction(handlers,{action});
+  assert.equal(run('state.drawer.serviceType'),type);
+  assert.match(nodes.get('#overlay-root').innerHTML,new RegExp(`name="serviceType" value="${type}"`));
+  ids.push(run('state.drawer.createRequestId'));
+  assert.match(ids.at(-1),uuidPattern);
+ }
+ assert.notEqual(ids[0],ids[1]);
+});
+
+test('HTTP manuscript upload retries keep their identifier and release the upload lock',async()=>{
+ const {run}=app(httpCrypto());await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`globalThis.uploads=[];globalThis.file={name:'稿件.pdf',size:100};globalThis.form={querySelector(){return null;}};
+  binaryRequest=async(path,file,headers)=>{uploads.push({path,headers});if(uploads.length===1)throw new Error('网络中断');return state.papers[0];};`);
+ await assert.rejects(run('uploadManuscript(state.papers[0],file,form)'),/网络中断/);
+ assert.equal(run('fileTransferBusy'),false);
+ await run('uploadManuscript(state.papers[0],file,form)');
+ assert.equal(run('fileTransferBusy'),false);
+ const uploads=run('uploads');
+ assert.equal(uploads.length,2);
+ assert.match(uploads[0].headers['X-Upload-Id'],uuidPattern);
+ assert.equal(uploads[1].headers['X-Upload-Id'],uploads[0].headers['X-Upload-Id']);
+ await run("uploadManuscript(state.papers[0],{name:'新稿件.pdf',size:100},form)");
+ assert.notEqual(run("uploads[2].headers['X-Upload-Id']"),uploads[0].headers['X-Upload-Id']);
+});
+
+test('HTTP receipt uploads retain their transaction and retry identifier after a network failure',async()=>{
+ const {run,handlers}=app(httpCrypto());await new Promise(resolve=>setImmediate(resolve));seedBusiness(run);
+ run(`state.drawer={kind:'receipt',paper:state.papers[0],transaction:state.papers[0].transactions[0]};
+  globalThis.uploads=[];globalThis.errors=[];globalThis.file={name:'凭证.png',size:100};
+  validateForm=()=>true;showFormError=(form,message)=>errors.push(message);
+  renderDetail=()=>{};renderShell=()=>{};
+  binaryRequest=async(path,file,headers)=>{uploads.push({path,headers});if(uploads.length===1)throw new Error('网络中断');return state.papers[0];};`);
+ const fixture=formEvent('receipt-form');
+ const querySelector=fixture.event.target.querySelector;
+ fixture.event.target.querySelector=selector=>selector==='#receipt-file'?{files:[run('file')]}:querySelector(selector);
+ for(let attempt=0;attempt<2;attempt++){
+  await Promise.all(handlers.get('submit').map(fn=>fn(fixture.event)));
+  assert.equal(run('fileTransferBusy'),false);
+  assert.equal(fixture.submit.disabled,false);
+ }
+ const uploads=run('uploads');
+ assert.equal(uploads.length,2);
+ assert.equal(run('errors.join()'),'网络中断');
+ assert.match(uploads[0].headers['X-Upload-Id'],uuidPattern);
+ assert.equal(uploads[1].headers['X-Upload-Id'],uploads[0].headers['X-Upload-Id']);
+ for(const upload of uploads)assert.equal(upload.headers['X-Transaction-Id'],'tx-0');
+ assert.equal(run('state.drawer.tab'),'finance');
 });
 
 function seed(run) {
@@ -2801,7 +2990,7 @@ test('page fee payments and refunds require confirmation and respect remaining c
  assert.equal(run("transactionTypeAllowed(state.papers[0],'incoming_publication_refund')"),true);
 });
 
-test('profit details and exports distinguish unknown costs, expected profit and settled cash',()=>{
+test('profit details and exports include pending costs as zero while keeping settlement separate',()=>{
  const {run,nodes}=app();seedBusiness(run);
  run(`Object.assign(state.papers[0],{publicationFeeMode:'included',publicationFeeCents:150000,publicationPaidCents:50000,publicationPayableCents:100000,
   profitEstimateKnown:true,estimatedProfitCents:450000,profitSettled:false,settledProfitCents:null,netCents:250000});
@@ -2814,8 +3003,13 @@ test('profit details and exports distinguish unknown costs, expected profit and 
  assert.equal(row[headers.indexOf('我方版面费成本（元）')],1500);
  assert.equal(row[headers.indexOf('预计利润（元）')],4500);
  assert.equal(row[headers.indexOf('已结清利润（元）')],'待结清');
- run("Object.assign(state.papers[0],{publicationFeeMode:'pending',profitEstimateKnown:false,estimatedProfitCents:null});renderDetail()");
- assert.match(nodes.get('#overlay-root').innerHTML,/待核算/);
+ run("Object.assign(state.papers[0],{publicationFeeMode:'pending',publicationFeeCents:0,publicationPayableCents:0,profitEstimateKnown:true,estimatedProfitCents:600000});renderDetail()");
+ assert.match(nodes.get('#overlay-root').innerHTML,/¥6,000\.00/);
+ assert.match(nodes.get('#overlay-root').innerHTML,/待确认版面费暂按 0 元/);
+ assert.doesNotMatch(nodes.get('#overlay-root').innerHTML,/待核算/);
+ run("paperCsvDownload('fee.csv',[['题目'],['论文']],state.papers.slice(0,1))");
+ assert.equal(run('csv[1]')[headers.indexOf('我方版面费成本（元）')],0);
+ assert.equal(run('csv[1]')[headers.indexOf('预计利润（元）')],6000);
  run("state.view='finance';state.financeType='balances';renderShell()");
  assert.match(nodes.get('#results').innerHTML,/版面费 \/ 预计利润/);
 });
@@ -2833,7 +3027,7 @@ test('finance annual summaries separate transaction year cash flows from paper y
   Object.assign(state.papers[1],{createdAt:'2025-05-10T12:00:00Z',transactions:[
    {id:'in-25-paid-26',type:'incoming_balance',amountCents:15000,date:'2026-04-01',createdAt:'2026-04-01T12:00:00Z',method:'转账',note:''},
    {id:'out-25-26',type:'outgoing_other',amountCents:3000,date:'2026-04-02',createdAt:'2026-04-02T12:00:00Z',method:'转账',note:''}],
-   receivableCents:90000,payableCents:10000,publicationPayableCents:0,profitEstimateKnown:false,estimatedProfitCents:null,profitSettled:false,settledProfitCents:null});
+   receivableCents:90000,payableCents:10000,publicationFeeMode:'pending',publicationFeeCents:0,publicationPayableCents:0,profitEstimateKnown:true,estimatedProfitCents:500000,profitSettled:false,settledProfitCents:null});
   state.financeYear='2026';renderFinance();`);
  let html=nodes.get('#content').innerHTML;
  assert.match(html,/2026 年收支汇总/);assert.match(html,/按年度查看收付款/);
@@ -2848,7 +3042,12 @@ test('finance annual summaries separate transaction year cash flows from paper y
  html=nodes.get('#content').innerHTML;
  assert.equal(run('state.financeYear'),'2025');
  assert.match(html,/2025 年收支汇总/);
- assert.match(html,/部分待核算/);assert.match(html,/1 篇版面费待确认/);
+ assert.match(html,/预计净利润[\s\S]*?¥5,000\.00/);assert.match(html,/1 篇版面费待确认，暂按 0 元计入/);
+ assert.doesNotMatch(html,/待核算/);
+ run("globalThis.annualRows=[];csvDownload=(name,rows)=>{annualRows=rows};exportFinanceYear()");
+ assert.equal(run("annualRows.find(row=>row[1]==='预计净利润')[2]"),5000);
+ assert.match(run("annualRows.find(row=>row[1]==='预计净利润')[3]"),/待确认版面费暂按 0 元/);
+ assert.equal(run("annualRows.find(row=>row[1]==='其中版面费待确认论文的预计利润')[2]"),5000);
  assert.match(html,/累计收款[\s\S]*?¥0\.00/);
  assert.match(html,/待收服务费[\s\S]*?¥900\.00/);
  assert.match(html,/value="all" >全部年份/);
@@ -2875,6 +3074,26 @@ test('year selection scopes source lists and exports while resets preserve the s
  run("exportFinanceYear()");csv=await run('yearExport.blob').text();
  assert.match(csv,/累计收款/);assert.match(csv,/净利润（已结清）/);assert.match(csv,/待退回版面费/);assert.match(csv,/全部年份/);
  for(const secret of ['private-account','private@example.com','13800000000'])assert.ok(!csv.includes(secret));
+});
+
+test('profit rows and exports include historical journal costs after resubmission',async()=>{
+ const {run,nodes}=app();await new Promise(resolve=>setImmediate(resolve));seed(run);
+ run(`state.view='finance';state.financeYear='all';state.financeType='profits';state.papers=state.papers.slice(0,1);
+  Object.assign(state.papers[0],{contractCents:200000,writerFeeCents:0,serviceType:'half',
+   publicationFeeMode:'included',publicationFeeCents:80000,publicationFeeTotalCents:100000,
+   publicationFees:[{id:'old-journal',mode:'included',costCents:20000,known:true,current:false},
+    {id:'new-journal',mode:'included',costCents:80000,known:true,current:true}],
+   profitEstimateKnown:true,estimatedProfitCents:100000,profitSettled:true,settledProfitCents:100000});
+  renderFinance();globalThis.rows=[];csvDownload=(name,data)=>{rows=data};exportFinance();`);
+ const cells=nodes.get('#results').innerHTML.match(/<tbody>[\s\S]*?<tr>([\s\S]*?)<\/tr>/)[1].match(/<td[^>]*>[\s\S]*?<\/td>/g);
+ assert.match(cells[5],/¥1,000\.00/);
+ assert.doesNotMatch(cells[5],/¥800\.00/);
+ const headers=Array.from(run('rows[0]'));
+ assert.equal(run('rows[1]')[headers.indexOf('版面费成本（元）')],1000);
+ for(const mode of ['included','free','pending']){
+  run(`state.financeType='balances';state.papers[0].publicationFeeMode='${mode}';renderFinance()`);
+  assert.match(nodes.get('#results').innerHTML,/成本 ¥1,000\.00/);
+ }
 });
 
 test('annual profit attribution handles cross-year settlement, refunds and negative profit without double counting',async()=>{
@@ -2928,7 +3147,7 @@ test('annual cash sums respect calendar boundaries and cents including refunds, 
  assert.deepEqual(Array.from(run('financeYearOptions()')),['2027','2026','2025','2024']);
  await Promise.all(handlers.get('change').map(fn=>fn({target:{id:'finance-year',value:'2023'}})));
  assert.equal(run('financeYearSummary().received'),0);assert.equal(run('financeYearSummary().settledProfit'),0);
- assert.equal(run('financeYearSummary().unknownCount'),0);
+ assert.equal(run('financeYearSummary().pendingFeeCount'),0);
  assert.match(nodes.get('#results').innerHTML,/没有找到符合条件/);
  run("state.papers=[];state.financeYear='all';renderFinance()");
  assert.match(nodes.get('#content').innerHTML,/全部年份收支汇总/);
