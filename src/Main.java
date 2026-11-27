@@ -173,6 +173,23 @@ public class Main {
             ApplicationStore vault = session.store();
             PaperService papers = new PaperService(vault);
             BusinessService business = new BusinessService(vault);
+            WriterService writers = new WriterService(vault);
+            if(path.equals("/api/writers")) {
+                if(method.equals("GET"))json(ex,200,writers.list());
+                else if(method.equals("POST"))json(ex,201,writers.create(body(ex)));
+                else throw new ApiException(405,"不支持的请求方法");
+                return;
+            }
+            if(path.startsWith("/api/writers/")&&!path.substring(13).contains("/")) {
+                String id=path.substring(13);
+                switch(method) {
+                    case "GET" -> json(ex,200,writers.get(id));
+                    case "PUT" -> json(ex,200,writers.update(id,body(ex)));
+                    case "DELETE" -> {writers.delete(id,body(ex));json(ex,200,Map.of("ok",true));}
+                    default -> throw new ApiException(405,"不支持的请求方法");
+                }
+                return;
+            }
             if(path.equals("/api/account/recovery-email")&&method.equals("GET")) {
                 json(ex,200,Map.of("email",accounts.recoveryEmail(vault.username())));return;
             }
@@ -203,7 +220,19 @@ public class Main {
                 switch (method) {
                     case "GET" -> json(ex, 200, business.customer(id));
                     case "PUT" -> json(ex, 200, business.updateCustomer(id, body(ex)));
-                    case "DELETE" -> { business.deleteCustomer(id, body(ex)); json(ex, 200, Map.of("ok", true)); }
+                    case "DELETE" -> {
+                        Map<String,Object> input=body(ex);
+                        synchronized(vault) {
+                            List<Map<String,Object>> files=new ArrayList<>();
+                            for(Object item:Json.array(vault.read().get("papers"))) {
+                                Map<String,Object> paper=Json.object(item);
+                                if(Main.string(paper,"customerId").equals(id))files.addAll(AttachmentService.files(paper).stream().map(Json::object).toList());
+                            }
+                            business.deleteCustomer(id,input);
+                            new AttachmentService(vault).removeBlobs(files);
+                        }
+                        json(ex,200,Map.of("ok",true));
+                    }
                     default -> throw new ApiException(405, "不支持的请求方法");
                 }
                 return;
@@ -211,6 +240,9 @@ public class Main {
             if (path.startsWith("/api/papers/")) {
                 String[] parts = path.substring("/api/papers/".length()).split("/");
                 String id = parts[0];
+                if(parts.length==2&&parts[1].equals("writer-reassignment")&&method.equals("POST")) {
+                    json(ex,200,papers.reassignWriter(id,body(ex)));return;
+                }
                 if(parts.length==2&&parts[1].equals("followups")&&method.equals("POST")) {
                     json(ex,201,papers.saveFollowUp(id,null,body(ex)));return;
                 }
@@ -394,8 +426,10 @@ public class Main {
     }
     private void sendFile(HttpExchange ex,Path file,String name) throws IOException {
         String encoded=URLEncoder.encode(name,StandardCharsets.UTF_8).replace("+","%20");
+        String extension=name.contains(".")?name.substring(name.lastIndexOf('.')).toLowerCase(Locale.ROOT):"";
+        if(!extension.matches("\\.[a-z0-9]{1,10}"))extension="";
         ex.getResponseHeaders().set("Content-Type","application/octet-stream");
-        ex.getResponseHeaders().set("Content-Disposition","attachment; filename=paper-desk-download; filename*=UTF-8''"+encoded);
+        ex.getResponseHeaders().set("Content-Disposition","attachment; filename=paper-desk-download"+extension+"; filename*=UTF-8''"+encoded);
         ex.sendResponseHeaders(200,Files.size(file));
         try(OutputStream output=ex.getResponseBody()){Files.copy(file,output);}
     }
