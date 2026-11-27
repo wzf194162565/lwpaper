@@ -365,7 +365,10 @@ public final class BusinessService {
     public void deleteCustomer(String id, Map<String, Object> input) throws Exception {
         vault.mutate(state -> {
             Map<String, Object> customer = findCustomer(state, id); PaperService.checkVersion(customer, input);
-            for (Object item : Json.array(state.get("papers"))) if (Main.string(Json.object(item), "customerId").equals(id)) throw new ApiException(409, "该客户还有关联论文，请先调整论文归属；也可以将客户标为已归档");
+            List<Object> papers=Json.array(state.get("papers"));
+            boolean linked=papers.stream().anyMatch(item->Main.string(Json.object(item),"customerId").equals(id));
+            if(linked&&!Boolean.TRUE.equals(input.get("confirmCascadeDelete")))throw new ApiException(409,"删除此客户将同时删除全部关联论文、投稿、跟进、收支及附件，请确认后重试");
+            papers.removeIf(item->Main.string(Json.object(item),"customerId").equals(id));
             Json.array(state.get("customers")).remove(customer); return null;
         });
     }
@@ -427,6 +430,7 @@ public final class BusinessService {
     }
 
     static void validateState(Map<String, Object> state) {
+        WriterService.validate(state);
         Set<String> customerIds = new HashSet<>(); List<Object> customers = Json.array(state.get("customers"));
         if (customers.size() > 10_000) throw new IllegalArgumentException();
         for (Object item : customers) {

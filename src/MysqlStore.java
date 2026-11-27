@@ -189,19 +189,21 @@ public final class MysqlStore implements ApplicationStore {
         Vault.validateState(loaded);
         // Importing another account's backup creates independent entities in this workspace.
         if(!username.equals(Main.string(loaded,"username"))) reidentify(loaded);
-        mutate(state->{state.put("customers",loaded.get("customers"));state.put("papers",loaded.get("papers"));return null;});
+        mutate(state->{state.put("customers",loaded.get("customers"));state.put("papers",loaded.get("papers"));state.put("writers",new ArrayList<>(WriterService.profiles(loaded)));return null;});
     }
     private static void reidentify(Map<String,Object> state) {
         Map<String,String> ids=new HashMap<>();
+        for(Object item:WriterService.profiles(state))remapIds(Json.object(item),ids,"id");
         for(Object item:Json.array(state.get("customers")))remapIds(Json.object(item),ids,"id");
         for(Object item:Json.array(state.get("papers"))) {
             Map<String,Object> paper=Json.object(item);
-            remapIds(paper,ids,"id","customerId","activeSubmissionId");
+            remapIds(paper,ids,"id","customerId","activeSubmissionId","writerId","writerAssignmentId");
+            for(Object a:WriterAssignments.all(paper))remapIds(Json.object(a),ids,"id","writerId");
             for(Object sub:Json.array(paper.get("submissions")))remapIds(Json.object(sub),ids,"id");
             for(Object tx:Json.array(paper.get("transactions")))remapIds(Json.object(tx),ids,"id");
             for(Object account:PublicationFees.accounts(paper))remapIds(Json.object(account),ids,"id","submissionId");
-            for(Object tx:Json.array(paper.get("transactions")))remapIds(Json.object(tx),ids,"reversalOf","correctsTransactionId","publicationAccountId");
-            for(Object event:FinancialLedger.audits(paper))remapIds(Json.object(event),ids,"id","transactionId","reversalOf","correctsTransactionId","publicationAccountId");
+            for(Object tx:Json.array(paper.get("transactions")))remapIds(Json.object(tx),ids,"reversalOf","correctsTransactionId","publicationAccountId","writerId","writerAssignmentId");
+            for(Object event:FinancialLedger.audits(paper))remapIds(Json.object(event),ids,"id","transactionId","reversalOf","correctsTransactionId","publicationAccountId","writerId","writerAssignmentId");
             for(Object file:AttachmentService.files(paper))remapIds(Json.object(file),ids,"transactionId");
             for(Object event:Json.array(paper.get("history")))remapIds(Json.object(event),ids,"id","submissionId");
         }
@@ -283,10 +285,35 @@ public final class MysqlStore implements ApplicationStore {
                 migrateFollowUpTasks(c);
                 migrateRecoveryEmail(c);
                 migrateLoginPasswordCopy(c);
+                migrateWriters(c);
+                migrateWriterAssignments(c);
                 execute(c,"INSERT IGNORE INTO lw_workspace(id,name,state_revision,created_at,updated_at) VALUES(?,?,0,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",WORKSPACE,"知序工作空间");
                 seedRoles(c);
             }finally{scalar(c,"SELECT RELEASE_LOCK(?)",lockName);}
         }
+    }
+    private void migrateWriterAssignments(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V017__writer_assignments.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=17");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V017 checksum mismatch");return;}
+        for(String sql:script.split(";"))if(!sql.isBlank()) {
+            if(sql.strip().startsWith("ALTER TABLE")) {
+                String[] tokens=sql.strip().split("\\s+");
+                String exists=scalar(c,"SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",tokens[2],tokens[5]);
+                if(!exists.isEmpty())continue;
+            }
+            try(Statement statement=c.createStatement()){statement.execute(sql);}
+        }
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(17,?,?,UTC_TIMESTAMP(6))","Writer assignments",checksum);
+    }
+    private void migrateWriters(Connection c) throws Exception {
+        String script=Files.readString(config.root.resolve("db/mysql/V016__writer_profiles.sql"),StandardCharsets.UTF_8);
+        String checksum=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(script.getBytes(StandardCharsets.UTF_8)));
+        String saved=scalar(c,"SELECT checksum FROM lw_schema_version WHERE version=16");
+        if(!saved.isEmpty()){if(!saved.equals(checksum))throw new IllegalStateException("V016 数据库迁移脚本校验不一致");return;}
+        try(Statement statement=c.createStatement()){for(String sql:script.split(";"))if(!sql.isBlank())statement.execute(sql);}
+        execute(c,"INSERT INTO lw_schema_version(version,description,checksum,installed_at) VALUES(16,?,?,UTC_TIMESTAMP(6))","写作者档案",checksum);
     }
     private void migrateCustomerCooperationDate(Connection c) throws Exception {
         String script=Files.readString(config.root.resolve("db/mysql/V002__customer_cooperation_date.sql"),StandardCharsets.UTF_8);

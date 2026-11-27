@@ -19,10 +19,11 @@ final class ServiceTermination {
         return PaperService.number(ended(paper)?Json.object(paper.get("termination")).get("customerCents"):paper.get("contractCents"));
     }
     static long writerTarget(Map<String,Object> paper) {
-        return PaperService.number(ended(paper)?Json.object(paper.get("termination")).get("writerCents"):paper.get("writerFeeCents"));
+        return ended(paper)?PaperService.number(Json.object(paper.get("termination")).get("writerCents")):PaperService.number(paper.get("writerFeeCents"))+WriterAssignments.previousFees(paper);
     }
     static void validateLedger(Map<String,Object> paper) {
         if(customerNet(paper)<0||writerNet(paper)<0||PublicationFees.paid(paper)<0)throw new ApiException(400,"退款或退回款项不能超过对应的累计实际收付款");
+        for(Object item:WriterAssignments.all(paper))if(WriterAssignments.paid(paper,Json.object(item),null)<0)throw new ApiException(400,"该写作者的退款不能超过其实际收款");
     }
     static void validateTransaction(Map<String,Object> paper,Map<String,Object> input,Map<String,Object> tx) {
         String type=Main.string(tx,"type");
@@ -30,6 +31,13 @@ final class ServiceTermination {
             if(ended(paper)&&Set.of("incoming_deposit","incoming_balance","outgoing_deposit","outgoing_balance").contains(type))
                 throw new ApiException(400,"服务已终止，请使用终止结算的收款、退款或稿酬类型");
             return;
+        }
+        if(WriterAssignments.TYPES.contains(type)&&!Main.string(tx,"writerAssignmentId").isEmpty()) {
+            Map<String,Object>a=WriterAssignments.find(paper,Main.string(tx,"writerAssignmentId"));
+            if(ended(paper)||a!=WriterAssignments.current(paper)) {
+                if(!Boolean.TRUE.equals(input.get("confirmSettlementPayment")))throw new ApiException(400,"请确认这笔款项已经实际收付");
+                return;
+            }
         }
         if(!ended(paper))throw new ApiException(400,"请先登记终止服务及最终结算金额");
         if(!Boolean.TRUE.equals(input.get("confirmSettlementPayment")))throw new ApiException(400,"请确认这笔款项已经实际收付");
@@ -54,7 +62,7 @@ final class ServiceTermination {
         for(String field:List.of("customerSettlement","writerSettlement"))if(!(input.get(field) instanceof String s)||s.isBlank())throw new ApiException(400,"请明确填写客户及写作者的最终结算金额，可填 0");
         long customer=PaperService.money(input,"customerSettlement"),writer=PaperService.money(input,"writerSettlement");
         if(customer>PaperService.number(paper.get("contractCents")))throw new ApiException(400,"客户最终结算金额不能超过原服务费用");
-        if(writer>PaperService.number(paper.get("writerFeeCents"))||(!BusinessService.hasWriting(paper)&&writer!=0))throw new ApiException(400,"写作者最终结算金额不能超过原稿酬，半包应为 0");
+        if(writer>PaperService.number(paper.get("writerFeeCents"))+WriterAssignments.previousFees(paper)||writer<WriterAssignments.previousFees(paper)||(!BusinessService.hasWriting(paper)&&writer!=0))throw new ApiException(400,"写作者总计结算不能超过全部约定稿酬，也不能低于已更换写作者的结算金额");
         next.put("terminatedAt",date);next.put("reason",reason);next.put("customerCents",customer);next.put("writerCents",writer);next.put("updatedAt",PaperService.now());
         paper.put("termination",next);PaperService.touch(paper);
         Map<String,Object> event=new LinkedHashMap<>();event.put("at",PaperService.now());
@@ -72,11 +80,16 @@ final class ServiceTermination {
         long refund=ended(paper)?Math.max(0,customer-target):0,recovery=ended(paper)?Math.max(0,writer-fee):0;
         result.put("refundableCents",refund);result.put("recoverableCents",recovery);
         result.put("settlementComplete",ended(paper)&&customer==target&&writer==fee);
+        if(!WriterAssignments.all(paper).isEmpty()) {
+            long payable=0,assignmentRecovery=0;for(Object item:WriterAssignments.views(paper)){Map<String,Object>a=Json.object(item);payable+=PaperService.number(a.get("payableCents"));assignmentRecovery+=PaperService.number(a.get("recoverableCents"));}
+            result.put("payableCents",payable);result.put("recoverableCents",assignmentRecovery);
+            result.put("settlementComplete",ended(paper)&&customer==target&&payable==0&&assignmentRecovery==0);
+        }
         if(ended(paper))result.put("writingOverdue",false);
     }
     static void validateStored(Map<String,Object> paper) {
         if(!paper.containsKey("termination")) {
-            for(Object item:Json.array(paper.get("transactions")))if(SETTLEMENT_TYPES.contains(Main.string(Json.object(item),"type")))throw new IllegalArgumentException();
+            for(Object item:Json.array(paper.get("transactions"))){Map<String,Object>tx=Json.object(item);if(SETTLEMENT_TYPES.contains(Main.string(tx,"type"))&&!(WriterAssignments.TYPES.contains(Main.string(tx,"type"))&&!Main.string(tx,"writerAssignmentId").isEmpty()&&WriterAssignments.find(paper,Main.string(tx,"writerAssignmentId"))!=WriterAssignments.current(paper)))throw new IllegalArgumentException();}
             return;
         }
         Map<String,Object> closure=Json.object(paper.get("termination"));
@@ -84,7 +97,7 @@ final class ServiceTermination {
         if(date.isEmpty()||PaperService.text(closure,"reason",1000).isEmpty())throw new IllegalArgumentException();
         Instant.parse(Main.string(closure,"updatedAt"));
         long customer=PaperService.number(closure.get("customerCents")),writer=PaperService.number(closure.get("writerCents"));
-        if(customer<0||customer>PaperService.number(paper.get("contractCents"))||writer<0||writer>PaperService.number(paper.get("writerFeeCents"))||(!BusinessService.hasWriting(paper)&&writer!=0))throw new IllegalArgumentException();
+        if(customer<0||customer>PaperService.number(paper.get("contractCents"))||writer<WriterAssignments.previousFees(paper)||writer>PaperService.number(paper.get("writerFeeCents"))+WriterAssignments.previousFees(paper)||(!BusinessService.hasWriting(paper)&&writer!=0))throw new IllegalArgumentException();
         validateLedger(paper);
     }
 }

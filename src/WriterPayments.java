@@ -14,7 +14,8 @@ final class WriterPayments {
     static void validateTerms(Map<String, Object> paper, Map<String, Object> next) {
         long fee = PaperService.number(next.get("writerFeeCents")), deposit = PaperService.number(next.get("writerDepositCents"));
         long oldFee = PaperService.number(paper.get("writerFeeCents")), oldDeposit = PaperService.number(paper.get("writerDepositCents"));
-        long paidDeposit = paid(paper, "outgoing_deposit"), paidBalance = paid(paper, "outgoing_balance");
+        Map<String,Object>a=WriterAssignments.current(paper);
+        long paidDeposit = a==null?paid(paper, "outgoing_deposit"):WriterAssignments.paid(paper,a,"outgoing_deposit"), paidBalance = a==null?paid(paper, "outgoing_balance"):WriterAssignments.paid(paper,a,"outgoing_balance");
         if (fee != oldFee && fee < paidDeposit + paidBalance) throw new ApiException(400, "稿酬总额不能低于累计已付稿酬，请先核对实际付款记录");
         if (deposit != oldDeposit && deposit < paidDeposit) throw new ApiException(400, "约定写作定金不能低于累计已付定金，请先核对实际付款记录");
         if (fee - deposit != oldFee - oldDeposit && fee - deposit < paidBalance) throw new ApiException(400, "约定写作尾款不能低于累计已付尾款，请先核对实际付款记录");
@@ -42,7 +43,8 @@ final class WriterPayments {
             Map<String, Object> payment = Json.object(item);
             if (!types.add(Main.string(payment, "type"))) throw new ApiException(400, "定金和尾款本次各登记一次，请核对金额");
             Map<String, Object> tx = PaperService.transaction(paper, payment);
-            validatePayment(paper, tx);
+            if(!Set.of("outgoing_deposit","outgoing_balance").contains(Main.string(tx,"type")))throw new ApiException(400,"请选择支付写作定金或尾款");
+            if(WriterAssignments.current(paper)!=null)WriterAssignments.bind(paper,Map.of(),tx);else validatePayment(paper, tx);
             FinancialLedger.record(paper,tx,actor);
         }
     }

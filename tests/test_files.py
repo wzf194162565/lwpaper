@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +15,20 @@ PDF = b'%PDF-1.7\nprivate-manuscript-content\n%%EOF\n'
 
 class AttachmentTest(ApiTestCase):
     JAVA_OPTIONS = ['-Dapp.fileMaxMb=1']
+    def test_backup_and_attachment_download_names_preserve_extensions(self):
+        self.setup_account()
+        with self.client.open(self.base + '/api/backup') as response:
+            self.assertIn('.vault', response.headers['Content-Disposition'])
+        paper = self.upload(self.create())
+        with self.client.open(self.base + '/api/backup') as response:
+            disposition = response.headers['Content-Disposition']
+            self.assertIn('filename=paper-desk-download.zip;', disposition)
+            self.assertIn("filename*=UTF-8''paper-desk-", disposition)
+            self.assertTrue(response.read().startswith(b'PK'))
+        with self.client.open(f"{self.base}/api/papers/{paper['id']}/files/{paper['files'][0]['id']}") as response:
+            self.assertIn('filename=paper-desk-download.pdf;', response.headers['Content-Disposition'])
+            self.assertEqual(PDF, response.read())
+
     def binary(self, path, content, headers=None, expected=201, raw=False):
         request = urllib.request.Request(self.base + path, data=content, method='POST', headers={
             'Content-Type': 'application/octet-stream', 'X-CSRF-Token': self.csrf, **(headers or {})})
@@ -158,6 +173,10 @@ class AttachmentTest(ApiTestCase):
             self.restore_archive(data.getvalue(), expected=400)
             self.assertEqual(paper['files'], self.call('GET', f"/api/papers/{paper['id']}")['files'])
             self.assertEqual(PDF, self.download_file(paper))
+            # The client can receive the last byte before the handler's finally block runs.
+            deadline = time.monotonic() + 1
+            while list(self.data.rglob('*.tmp')) and time.monotonic() < deadline:
+                time.sleep(.01)
             self.assertFalse(list(self.data.rglob('*.tmp')))
         self.restore_archive(backup)
         restored = self.call('GET', '/api/papers')[0]

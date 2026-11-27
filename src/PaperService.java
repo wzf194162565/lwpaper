@@ -13,8 +13,8 @@ public final class PaperService {
     public PaperService(BusinessStore vault) { this.vault = vault; }
 
     private void ensureCodes() {
-        if(!PaperCodes.needed(vault.read()))return;
-        try { vault.mutate(state->{PaperCodes.migrate(state);return null;}); }
+        if(!PaperCodes.needed(vault.read())&&!WriterService.needsSync(vault.read()))return;
+        try { vault.mutate(state->{PaperCodes.migrate(state);WriterService.sync(state);return null;}); }
         catch(RuntimeException e){throw e;}catch(Exception e){throw new IllegalStateException("论文编号更新失败",e);}
     }
     public List<Object> list() {
@@ -49,22 +49,26 @@ public final class PaperService {
             paper.put("transactions", new ArrayList<>());
             paper.put("history", new ArrayList<>(List.of(event(paper, "建立论文档案"))));
             BusinessService.initializePaper(state, paper, input);
+            WriterService.sync(state);WriterService.resolve(state,paper,input);WriterAssignments.initialize(paper);
             paper.put("code",PaperCodes.next(state,paper));
             PublicationFees.initialize(paper);WriterPayments.apply(paper, input,FinancialLedger.actor(vault));CustomerReceipts.apply(paper,input,FinancialLedger.actor(vault));
             FollowUps.initialize(paper);
             records.add(paper);
+            WriterService.sync(state);
             return publicPaper(paper, true, state);
         });
     }
 
     public Map<String, Object> update(String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
+            WriterService.sync(state);
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             ServiceTermination.requireActive(paper);
             FollowUps.initialize(paper);
             String oldFollowUpDate=Main.string(paper,"followUpAt"),oldFollowUpReason=Main.string(paper,"followUpReason");
             Map<String, Object> originalTerms = new LinkedHashMap<>(paper);
             Map<String, Object> nextFields = fields(input, paper);
+            if((input.containsKey("writerId")&&!Main.string(input,"writerId").equals(Main.string(paper,"writerId")))||(input.containsKey("writer")&&!Main.string(input,"writer").equals(Main.string(paper,"writer"))))throw new ApiException(409,"更换写作者请使用更换写作者，保留原安排和结算历史");
             WriterPayments.validateTerms(paper, nextFields);
             if(!input.containsKey("customerReceiptTotals"))FinancialRules.validateCustomerTerms(paper,nextFields);
             validateFollowUp(nextFields, paper, input);
@@ -78,6 +82,8 @@ public final class PaperService {
             PublicationFees.recordChange(paper,nextFields);
             paper.putAll(nextFields); FollowUps.legacyUpdate(paper,oldFollowUpDate,oldFollowUpReason); touch(paper);
             BusinessService.updatePaper(state, paper, input);
+            WriterService.sync(state);
+            WriterAssignments.refresh(paper);
             if(PublicationFees.hasTerms(input)||journalChanged)PublicationFees.updateCurrent(paper,Map.of("publicationFeeMode",nextFields.get("publicationFeeMode"),"publicationFeeAmount",BigDecimal.valueOf(number(nextFields.get("publicationFeeCents")),2).toPlainString()));
             if(PublicationFees.hasTerms(input)||journalChanged)FinancialLedger.audit(paper,"fee_update",Map.of("publicationAccountId",PublicationFees.current(paper).get("id")),FinancialLedger.actor(vault),"论文表单更新费用："+PublicationFees.descriptionAccount(PublicationFees.current(paper)),"");
             WriterPayments.apply(paper, input,FinancialLedger.actor(vault));CustomerReceipts.apply(paper,input,FinancialLedger.actor(vault));
@@ -112,6 +118,7 @@ public final class PaperService {
 
     public Map<String,Object> terminate(String id,Map<String,Object> input,boolean revision) throws Exception {
         return vault.mutate(state -> {
+            WriterService.sync(state);
             Map<String,Object> paper=find(state,id);checkVersion(paper,input);
             ServiceTermination.close(paper,input,revision);
             return publicPaper(paper,true,state);
@@ -128,17 +135,41 @@ public final class PaperService {
 
     public Map<String, Object> addTransaction(String id, Map<String, Object> input) throws Exception {
         return vault.mutate(state -> {
+            WriterService.sync(state);
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             List<Object> transactions = Json.array(paper.get("transactions"));
             Map<String, Object> tx = transaction(paper, input);
+            WriterAssignments.bind(paper,input,tx);
             ServiceTermination.validateTransaction(paper,input,tx);
-            FinancialRules.validateTransaction(paper,tx);
+            if(!WriterAssignments.TYPES.contains(Main.string(tx,"type"))||WriterAssignments.current(paper)==null)FinancialRules.validateTransaction(paper,tx);
             PublicationFees.validateTransaction(paper,input,tx);
             if (input.containsKey("confirmWriterPayment") && !Boolean.TRUE.equals(input.get("confirmWriterPayment"))) throw new ApiException(400, "请确认本次金额已实际支付");
-            if (Boolean.TRUE.equals(input.get("confirmWriterPayment"))) WriterPayments.validatePayment(paper, tx);
+            if (Boolean.TRUE.equals(input.get("confirmWriterPayment"))&&WriterAssignments.current(paper)==null) WriterPayments.validatePayment(paper, tx);
             String correction=text(input,"correctsTransactionId",36);
+            if(!correction.isEmpty()&&WriterAssignments.TYPES.contains(Main.string(tx,"type"))&&!Main.string(FinancialLedger.find(paper,correction),"writerAssignmentId").equals(Main.string(tx,"writerAssignmentId")))throw new ApiException(400,"重记流水必须保留原写作安排归属");
             if(!correction.isEmpty()){Map<String,Object> original=FinancialLedger.find(paper,correction);if(!Main.string(original,"reversalOf").isEmpty()||!FinancialLedger.reversed(paper,correction))throw new ApiException(400,"请先冲销原始流水，再重新登记");tx.put("correctsTransactionId",correction);}
             FinancialLedger.record(paper,tx,FinancialLedger.actor(vault));touch(paper);return publicPaper(paper,true,state);
+        });
+    }
+
+    public Map<String,Object> reassignWriter(String id,Map<String,Object> input) throws Exception {
+        return vault.mutate(state->{
+            WriterService.sync(state);Map<String,Object>p=find(state,id);checkVersion(p,input);ServiceTermination.requireActive(p);
+            if(!BusinessService.hasWriting(p))throw new ApiException(400,"半包论文没有写作安排");
+            String reason=text(input,"reason",1000),writerId=text(input,"writerId",36);
+            if(reason.isBlank()||writerId.isEmpty())throw new ApiException(400,"请选择新写作者并填写更换原因");
+            if(writerId.equals(Main.string(p,"writerId")))throw new ApiException(400,"请选择不同的写作者");
+            Map<String,Object>w=WriterService.find(state,writerId);if(!Main.string(w,"status").equals("active"))throw new ApiException(400,"请选择合作中的写作者");
+            if(!input.containsKey("previousSettlement")||!input.containsKey("writerFee")||!input.containsKey("writerDepositAmount"))throw new ApiException(400,"请明确填写原写作者结算金额、新稿酬和定金");
+            long settlement=money(input,"previousSettlement");if(settlement>number(p.get("writerFeeCents")))throw new ApiException(400,"原写作者结算不能超过原约定稿酬");
+            Map<String,Object>a=WriterAssignments.current(p);a.put("finalCents",settlement);a.put("closedAt",now());a.put("reason",reason);
+            Map<String,Object>nextInput=new LinkedHashMap<>();
+            for(String key:List.of("writerFee","writerDepositAmount","writingStartAt","writingDueAt"))if(input.containsKey(key))nextInput.put(key,input.get(key));
+            nextInput.put("writer",w.get("name"));nextInput.put("writingDeliveredAt","");nextInput.put("writingStatus","写作中");
+            nextInput.putIfAbsent("writingStartAt",java.time.LocalDate.now().toString());nextInput.putIfAbsent("writingDueAt","");
+            p.putAll(fields(nextInput,p));p.put("writerId",writerId);WriterAssignments.add(p);touch(p);
+            Json.array(p.get("history")).add(event(p,"更换写作者："+Main.string(a,"writer")+" → "+Main.string(w,"name")+" · "+reason));
+            return publicPaper(p,true,state);
         });
     }
 
@@ -164,6 +195,7 @@ public final class PaperService {
 
     public Map<String,Object> reverseTransaction(String id,String transactionId,Map<String,Object> input) throws Exception {
         return vault.mutate(state -> {
+            WriterService.sync(state);
             Map<String, Object> paper = find(state, id); checkVersion(paper, input);
             PublicationFees.initialize(paper);FinancialLedger.reverse(paper,transactionId,input,FinancialLedger.actor(vault));
             touch(paper); return publicPaper(paper, true, state);
@@ -241,6 +273,8 @@ public final class PaperService {
         ServiceTermination.enrich(paper,result);
         PublicationFees.enrich(paper,result);
         FinancialLedger.enrich(paper,result);
+        result.put("writerAssignments",WriterAssignments.views(paper));
+        result.put("totalWriterFeeCents",ServiceTermination.writerTarget(paper));
         return result;
     }
 

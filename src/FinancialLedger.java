@@ -17,7 +17,7 @@ final class FinancialLedger {
         if(!(paper.get("financialAudit") instanceof List<?>))paper.put("financialAudit",new ArrayList<>());
         Map<String,Object> event=new LinkedHashMap<>();
         event.put("id",UUID.randomUUID().toString());event.put("action",action);event.put("actor",actor);event.put("at",PaperService.now());
-        for(String key:List.of("type","date","method","note","reversalOf","publicationAccountId","correctsTransactionId"))event.put(key,Main.string(tx,key));
+        for(String key:List.of("type","date","method","note","reversalOf","publicationAccountId","correctsTransactionId","writerId","writerAssignmentId","writerName"))event.put(key,Main.string(tx,key));
         event.put("amountCents",PaperService.number(tx.getOrDefault("amountCents",0)));event.put("transactionId",Main.string(tx,"id"));
         event.put("reason",reason);event.put("fileId",fileId);Json.array(paper.get("financialAudit")).add(event);
         String label=switch(action){case "reverse"->"冲销收支";case "receipt"->"上传收支凭证";case "fee_update"->"调整投稿版面费";case "fee_assign"->"核对历史版面费归属";default->"登记收支";};
@@ -51,7 +51,7 @@ final class FinancialLedger {
             if(!ref.isEmpty()) {
                 Map<String,Object> original=find(paper,ref);
                 if(!Main.string(original,"reversalOf").isEmpty()||!reversed.add(ref)||Main.string(tx,"reversalReason").isBlank()||
-                   !List.of("type","amountCents","date","publicationAccountId").stream().allMatch(k->Objects.toString(tx.get(k),"").equals(Objects.toString(original.get(k),""))))throw new IllegalArgumentException("Invalid reversal");
+                   !List.of("type","amountCents","date","publicationAccountId","writerId","writerAssignmentId").stream().allMatch(k->Objects.toString(tx.get(k),"").equals(Objects.toString(original.get(k),""))))throw new IllegalArgumentException("Invalid reversal");
             }
             String correction=Main.string(tx,"correctsTransactionId");
             if(!correction.isEmpty()&&(!Main.string(find(paper,correction),"reversalOf").isEmpty()||!reversed(paper,correction)))throw new IllegalArgumentException("Invalid correction reference");
